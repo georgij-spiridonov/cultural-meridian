@@ -1,0 +1,71 @@
+"""Публичный фасад чистых доменных сервисов без зависимостей ввода-вывода."""
+
+from src.domain.services.deduplication import (
+    DuplicateMatchResult,
+    are_events_duplicates,
+    compute_deduplication_key,
+    compute_payload_hash,
+    merge_event_sources,
+)
+from src.domain.services.normalization import (
+    BASHKORTOSTAN_TIMEZONE,
+    DEFAULT_BASHKORTOSTAN_CITIES,
+    extract_event_tags,
+    normalize_city,
+    normalize_optional_text,
+    normalize_source_item,
+    normalize_text_for_matching,
+    normalize_title,
+    normalize_venue,
+    parse_age_limit,
+    parse_category,
+    parse_event_datetime,
+    parse_language,
+    parse_price_range,
+)
+from src.domain.services.sanitization import (
+    DEFAULT_PROTECTED_PROMPT_MARKERS,
+    SanitizationInspectionResult,
+    contains_system_prompt_leak,
+    inspect_untrusted_text,
+    sanitize_control_characters,
+    wrap_untrusted_event_data,
+)
+from src.domain.services.travel_estimator import (
+    EARTH_MEAN_RADIUS_KILOMETERS,
+    calculate_haversine_kilometers,
+    estimate_urban_travel,
+    is_within_center_radius,
+)
+
+__all__ = [
+    "BASHKORTOSTAN_TIMEZONE",
+    "DEFAULT_BASHKORTOSTAN_CITIES",
+    "DEFAULT_PROTECTED_PROMPT_MARKERS",
+    "EARTH_MEAN_RADIUS_KILOMETERS",
+    "DuplicateMatchResult",
+    "SanitizationInspectionResult",
+    "are_events_duplicates",
+    "calculate_haversine_kilometers",
+    "compute_deduplication_key",
+    "compute_payload_hash",
+    "contains_system_prompt_leak",
+    "estimate_urban_travel",
+    "extract_event_tags",
+    "inspect_untrusted_text",
+    "is_within_center_radius",
+    "merge_event_sources",
+    "normalize_city",
+    "normalize_optional_text",
+    "normalize_source_item",
+    "normalize_text_for_matching",
+    "normalize_title",
+    "normalize_venue",
+    "parse_age_limit",
+    "parse_category",
+    "parse_event_datetime",
+    "parse_language",
+    "parse_price_range",
+    "sanitize_control_characters",
+    "wrap_untrusted_event_data",
+]
