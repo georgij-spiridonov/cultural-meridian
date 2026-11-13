@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}Подписки и обратная связь — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="hero-banner" aria-labelledby="subscriptions-hero-title">
+    <p class="hero-banner__eyebrow">Минимум персональных данных</p>
+    <h1 id="subscriptions-hero-title" class="hero-banner__title">
+      Тематические подписки и форма для организаторов
+    </h1>
+    <p class="hero-banner__lead">
+      Сервис не собирает телефоны, паспорта или домашние адреса: подписка привязывается только к
+      обезличенному техническому идентификатору браузера и физически удаляется по нажатию кнопки.
+    </p>
+  </section>
+
+  <div class="split-grid">
+    <section class="panel-card" aria-labelledby="create-sub-heading">
+      <h2 id="create-sub-heading" class="panel-card__heading">Новая подписка на события</h2>
+      <p style="margin: 0 0 14px; font-size: 0.9rem; color: var(--ink-secondary);">
+        Технический идентификатор сессии: <code>{{ visitor_identifier[:16] }}…</code>
+      </p>
+
+      <form
+        action="/subscriptions"
+        method="post"
+        hx-post="/subscriptions"
+        hx-target="#subscriptions-list"
+        hx-swap="innerHTML"
+        style="display: flex; flex-direction: column; gap: 12px;"
+      >
+        <div class="form-field">
+          <label class="form-label" for="sub-city">Город</label>
+          <select id="sub-city" class="form-control" name="city">
+            <option value="">Любой город Башкортостана</option>
+            {% for city_ref in cities %}
+              <option value="{{ city_ref.name }}">{{ city_ref.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="sub-category">Категория мероприятий</label>
+          <select id="sub-category" class="form-control" name="category">
+            <option value="">Все категории</option>
+            {% for value, label in category_options %}
+              <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <button class="button button--primary" type="submit">Подписаться</button>
+      </form>
+
+      <hr style="margin: 22px 0; border: 0; border-top: 1px solid var(--border-subtle);" />
+
+      <h3 style="margin: 0 0 10px; font-size: 1.05rem;">Активные подписки браузера</h3>
+      <div id="subscriptions-list">
+        {% include "partials/subscriptions_list.html" %}
+      </div>
+    </section>
+
+    <section class="panel-card" aria-labelledby="general-feedback-heading">
+      <h2 id="general-feedback-heading" class="panel-card__heading">
+        Предложить мероприятие или уточнить информацию
+      </h2>
+      <p style="margin: 0 0 14px; font-size: 0.9rem; color: var(--ink-secondary);">
+        Организаторы и учреждения культуры Башкортостана могут передать анонс события или поправку
+        к расписанию на проверку редакции.
+      </p>
+
+      <div id="general-feedback-result"></div>
+
+      <form
+        action="/feedback"
+        method="post"
+        hx-post="/feedback"
+        hx-target="#general-feedback-result"
+        hx-swap="innerHTML"
+        style="display: flex; flex-direction: column; gap: 12px;"
+      >
+        <div class="honeypot-field" aria-hidden="true">
+          <label for="general-honeypot">Не заполняйте это поле</label>
+          <input id="general-honeypot" type="text" name="honeypot_website" tabindex="-1" autocomplete="off" />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="general-feedback-text">Описание события или замечание</label>
+          <textarea
+            id="general-feedback-text"
+            class="form-control"
+            name="message_text"
+            rows="6"
+            minlength="8"
+            maxlength="1200"
+            required
+            data-error="general-feedback-error"
+            placeholder="Название, город, дата, площадка, стоимость и ссылка на официальный анонс"
+          ></textarea>
+          <span id="general-feedback-error" class="field-error" hidden></span>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="general-contact-hint">Публичная ссылка или контакт организации (необязательно)</label>
+          <input
+            id="general-contact-hint"
+            class="form-control"
+            type="text"
+            name="contact_hint"
+            maxlength="160"
+            placeholder="Например: https://minkult.bashkortostan.ru или @press_ufa"
+          />
+        </div>
+
+        <button class="button button--primary" type="submit">Отправить в редакцию</button>
+      </form>
+    </section>
+  </div>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% if notice_message %}
+  <div class="alert alert--success" role="status">{{ notice_message }}</div>
+{% endif %}
+
+{% if error_message %}
+  <div class="alert alert--danger" role="alert">{{ error_message }}</div>
+{% endif %}
+
+{% if subscriptions %}
+  <ul class="source-list">
+    {% for subscription in subscriptions %}
+      <li class="source-list__item">
+        <div>
+          <strong>
+            {% if subscription.city %}{{ subscription.city }}{% else %}Все города Башкортостана{% endif %}
+          </strong>
+          ·
+          <span>
+            {% if subscription.category %}{{ category_labels[subscription.category] }}{% else %}Все категории{% endif %}
+          </span>
+          <div style="font-size: 0.82rem; color: var(--ink-secondary);">
+            Оформлена: {{ subscription.created_at.strftime('%d.%m.%Y %H:%M') }}
+          </div>
+        </div>
+
+        <form
+          action="/subscriptions/{{ subscription.subscription_identifier }}/delete"
+          method="post"
+          hx-post="/subscriptions/{{ subscription.subscription_identifier }}/delete"
+          hx-target="#subscriptions-list"
+          hx-swap="innerHTML"
+        >
+          <button class="button button--small button--danger" type="submit">Удалить</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+
+  <div style="margin-top: 14px; display: flex; justify-content: flex-end;">
+    <form
+      action="/subscriptions/delete-all"
+      method="post"
+      hx-post="/subscriptions/delete-all"
+      hx-target="#subscriptions-list"
+      hx-swap="innerHTML"
+    >
+      <button class="button button--small" type="submit">Удалить все мои подписки</button>
+    </form>
+  </div>
+{% else %}
+  <div class="alert alert--info" role="status">
+    Активных подписок пока нет. Выберите город или категорию в форме слева, чтобы получать тематические подборки без регистрации и телефона.
+  </div>
+{% endif %}

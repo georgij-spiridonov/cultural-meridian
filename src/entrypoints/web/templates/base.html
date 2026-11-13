@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Культурный Меридиан — Афиша Республики Башкортостан{% endblock %}</title>
+    <meta
+      name="description"
+      content="Официальный агрегатор проверенных культурных мероприятий Республики Башкортостан: концерты, театры, выставки, лекции и семейные события."
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d594b'/%3E%3Ctext x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' fill='%23ffffff' font-family='sans-serif' font-size='28' font-weight='800'%3E%D0%9A%D0%9C%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/vendor/htmx.min.js" defer></script>
+    <script src="/static/app.js" defer></script>
+    {% block extra_head %}{% endblock %}
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Перейти к основному содержимому</a>
+
+    <div id="live-announcer" aria-live="polite" class="visually-hidden"></div>
+
+    <aside class="disclaimer-bar" aria-label="Важное уведомление об источниках данных">
+      <div class="container disclaimer-bar__inner">
+        <span class="disclaimer-bar__badge">Республика Башкортостан · Агрегатор событий</span>
+        <span>{{ disclaimer_text }}</span>
+      </div>
+    </aside>
+
+    <header class="site-header">
+      <div class="container site-header__inner">
+        <a class="brand-mark" href="/">
+          <span class="brand-mark__emblem" aria-hidden="true">КМ</span>
+          <span>
+            <span class="brand-mark__title">Культурный Меридиан</span>
+            <span class="brand-mark__subtitle">Афиша городов Башкортостана</span>
+          </span>
+        </a>
+
+        <nav class="primary-nav" aria-label="Основная навигация">
+          <a
+            class="primary-nav__link {% if active_nav == 'catalog' %}primary-nav__link--active{% endif %}"
+            href="/"
+            {% if active_nav == 'catalog' %}aria-current="page"{% endif %}
+          >
+            Каталог
+          </a>
+          <a
+            class="primary-nav__link {% if active_nav == 'subscriptions' %}primary-nav__link--active{% endif %}"
+            href="/subscriptions"
+            {% if active_nav == 'subscriptions' %}aria-current="page"{% endif %}
+          >
+            Подписки и обратная связь
+          </a>
+          <a
+            class="primary-nav__link {% if active_nav == 'assistant' %}primary-nav__link--active{% endif %}"
+            href="/assistant"
+            {% if active_nav == 'assistant' %}aria-current="page"{% endif %}
+          >
+            Ассистент
+          </a>
+          <a
+            class="primary-nav__link {% if active_nav == 'widget' %}primary-nav__link--active{% endif %}"
+            href="/widget/demo"
+            {% if active_nav == 'widget' %}aria-current="page"{% endif %}
+          >
+            Виджет
+          </a>
+          <a
+            class="primary-nav__link {% if active_nav == 'admin' %}primary-nav__link--active{% endif %}"
+            href="/admin"
+            {% if active_nav == 'admin' %}aria-current="page"{% endif %}
+          >
+            Модерация
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-main">
+      <div class="container">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container site-footer__inner">
+        <div>
+          <strong>Культурный Меридиан</strong> ({{ current_year }}). {{ disclaimer_text }}
+        </div>
+        <div class="site-footer__links">
+          <a href="/docs" target="_blank" rel="noopener noreferrer">OpenAPI (REST API)</a>
+          <a href="/widget/demo">Встроить виджет на сайт</a>
+          <a href="/subscriptions">Сообщить о событии</a>
+          <a href="/health">Статус сервиса</a>
+        </div>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,686 @@
+{% extends "base.html" %}
+
+{% block title %}Панель администратора и модератора — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="hero-banner" aria-labelledby="admin-hero-title">
+    <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;">
+      <div>
+        <p class="hero-banner__eyebrow">Модератор: {{ moderator_username }}</p>
+        <h1 id="admin-hero-title" class="hero-banner__title" style="margin-bottom: 4px;">
+          Управление каталогом, импортом и модерацией
+        </h1>
+      </div>
+
+      <form action="/admin/logout" method="post">
+        <button class="button button--small" type="submit">Выйти из сессии</button>
+      </form>
+    </div>
+  </section>
+
+  {% if notice_message %}
+    <div class="alert alert--success" role="status">{{ notice_message }}</div>
+  {% endif %}
+  {% if error_message %}
+    <div class="alert alert--danger" role="alert">{{ error_message }}</div>
+  {% endif %}
+
+  <div class="kpi-strip" aria-label="Сводные показатели каталога">
+    <div class="kpi-card">
+      <span class="kpi-card__label">Опубликовано событий</span>
+      <span class="kpi-card__value">{{ published_count }}</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-card__label">Ожидают модерации</span>
+      <span class="kpi-card__value">{{ pending_moderation | length }}</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-card__label">Обращений пользователей</span>
+      <span class="kpi-card__value">{{ feedback_requests | length }}</span>
+    </div>
+    <div class="kpi-card">
+      <span class="kpi-card__label">Записей в аудите</span>
+      <span class="kpi-card__value">{{ audit_logs | length }}</span>
+    </div>
+  </div>
+
+  <nav class="tabs-bar" aria-label="Разделы панели модератора">
+    <a
+      class="tabs-bar__link {% if active_tab == 'catalog' %}tabs-bar__link--active{% endif %}"
+      href="/admin?tab=catalog&status={{ status_filter }}"
+    >
+      Каталог и редактор
+    </a>
+    <a
+      class="tabs-bar__link {% if active_tab == 'import' %}tabs-bar__link--active{% endif %}"
+      href="/admin?tab=import"
+    >
+      Импорт CSV / JSON
+    </a>
+    <a
+      class="tabs-bar__link {% if active_tab == 'moderation' %}tabs-bar__link--active{% endif %}"
+      href="/admin?tab=moderation"
+    >
+      Очередь модерации ({{ pending_moderation | length }})
+    </a>
+    <a
+      class="tabs-bar__link {% if active_tab == 'feedback' %}tabs-bar__link--active{% endif %}"
+      href="/admin?tab=feedback"
+    >
+      Обращения ({{ feedback_requests | length }})
+    </a>
+    <a
+      class="tabs-bar__link {% if active_tab == 'audit' %}tabs-bar__link--active{% endif %}"
+      href="/admin?tab=audit"
+    >
+      Журнал аудита
+    </a>
+  </nav>
+
+  {% if active_tab == "catalog" %}
+    <div class="split-grid">
+      <section class="panel-card" aria-labelledby="manual-event-heading">
+        <h2 id="manual-event-heading" class="panel-card__heading">
+          {% if editing_event %}
+            Редактирование карточки: «{{ editing_event.title }}»
+          {% else %}
+            Добавить мероприятие вручную
+          {% endif %}
+        </h2>
+
+        <form
+          action="{% if editing_event %}/admin/events/{{ editing_event.identifier }}/edit{% else %}/admin/events{% endif %}"
+          method="post"
+          style="display: flex; flex-direction: column; gap: 12px;"
+        >
+          <div class="form-field">
+            <label class="form-label" for="ev-title">Название мероприятия</label>
+            <input
+              id="ev-title"
+              class="form-control"
+              type="text"
+              name="title"
+              required
+              value="{{ editing_event.title if editing_event else '' }}"
+              data-error="ev-title-err"
+            />
+            <span id="ev-title-err" class="field-error" hidden></span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+            <div class="form-field">
+              <label class="form-label" for="ev-category">Категория</label>
+              <select id="ev-category" class="form-control" name="category">
+                {% for cat_enum, cat_label in category_labels.items() %}
+                  <option
+                    value="{{ cat_enum.value }}"
+                    {% if editing_event and editing_event.category == cat_enum %}selected{% endif %}
+                  >
+                    {{ cat_label }}
+                  </option>
+                {% endfor %}
+              </select>
+            </div>
+
+            <div class="form-field">
+              <label class="form-label" for="ev-status">Статус публикации</label>
+              <select id="ev-status" class="form-control" name="status">
+                <option value="published" {% if not editing_event or editing_event.status.value == 'published' %}selected{% endif %}>
+                  Опубликовано
+                </option>
+                <option value="draft" {% if editing_event and editing_event.status.value == 'draft' %}selected{% endif %}>
+                  Черновик / на проверке
+                </option>
+                <option value="canceled" {% if editing_event and editing_event.status.value == 'canceled' %}selected{% endif %}>
+                  Отменено
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px;">
+            <div class="form-field">
+              <label class="form-label" for="ev-date-start">Дата и время начала</label>
+              <input
+                id="ev-date-start"
+                class="form-control"
+                type="datetime-local"
+                name="date_start"
+                required
+                value="{{ editing_event.date_start.strftime('%Y-%m-%dT%H:%M') if editing_event else '' }}"
+              />
+            </div>
+
+            <div class="form-field">
+              <label class="form-label" for="ev-date-end">Окончание (необязательно)</label>
+              <input
+                id="ev-date-end"
+                class="form-control"
+                type="datetime-local"
+                name="date_end"
+                value="{{ editing_event.date_end.strftime('%Y-%m-%dT%H:%M') if editing_event and editing_event.date_end else '' }}"
+              />
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;">
+            <div class="form-field">
+              <label class="form-label" for="ev-city">Город</label>
+              <input
+                id="ev-city"
+                class="form-control"
+                type="text"
+                name="city"
+                list="cities-datalist"
+                required
+                value="{{ editing_event.city if editing_event else 'Уфа' }}"
+              />
+              <datalist id="cities-datalist">
+                {% for city_ref in cities %}
+                  <option value="{{ city_ref.name }}"></option>
+                {% endfor %}
+              </datalist>
+            </div>
+
+            <div class="form-field">
+              <label class="form-label" for="ev-venue">Площадка</label>
+              <input
+                id="ev-venue"
+                class="form-control"
+                type="text"
+                name="venue"
+                required
+                value="{{ editing_event.venue if editing_event else '' }}"
+              />
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="ev-address">Точный адрес</label>
+            <input
+              id="ev-address"
+              class="form-control"
+              type="text"
+              name="address"
+              required
+              value="{{ editing_event.address if editing_event else '' }}"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="ev-description">Описание</label>
+            <textarea id="ev-description" class="form-control" name="description" rows="3">{{ editing_event.description if editing_event else '' }}</textarea>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px;">
+            <div class="form-field">
+              <label class="form-label" for="ev-price-min">Цена от, ₽</label>
+              <input
+                id="ev-price-min"
+                class="form-control"
+                type="number"
+                min="0"
+                name="price_minimum"
+                value="{{ editing_event.price_minimum if editing_event and editing_event.price_minimum is not none else '' }}"
+              />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="ev-price-max">Цена до, ₽</label>
+              <input
+                id="ev-price-max"
+                class="form-control"
+                type="number"
+                min="0"
+                name="price_maximum"
+                value="{{ editing_event.price_maximum if editing_event and editing_event.price_maximum is not none else '' }}"
+              />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="ev-age">Возраст</label>
+              <select id="ev-age" class="form-control" name="age_limit">
+                {% for age in age_options %}
+                  <option value="{{ age }}" {% if editing_event and editing_event.age_limit == age %}selected{% endif %}>
+                    {{ age }}+
+                  </option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px;">
+            <div class="form-field">
+              <label class="form-label" for="ev-duration">Длительность, мин.</label>
+              <input
+                id="ev-duration"
+                class="form-control"
+                type="number"
+                min="15"
+                name="duration_minutes"
+                value="{{ editing_event.duration_minutes if editing_event and editing_event.duration_minutes is not none else '' }}"
+              />
+            </div>
+            <div class="form-field">
+              <label class="form-label" for="ev-language">Язык</label>
+              <input
+                id="ev-language"
+                class="form-control"
+                type="text"
+                name="language"
+                value="{{ editing_event.language if editing_event and editing_event.language else 'русский' }}"
+              />
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="ev-tags">Теги (через запятую)</label>
+            <input
+              id="ev-tags"
+              class="form-control"
+              type="text"
+              name="tags"
+              value="{{ editing_event.tags | join(', ') if editing_event else '' }}"
+              placeholder="музыка, вечер, уфа"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="ev-source-url">Официальная ссылка источника (http/https)</label>
+            <input
+              id="ev-source-url"
+              class="form-control"
+              type="url"
+              name="source_url"
+              required
+              value="{{ editing_event.sources[0].source_url if editing_event and editing_event.sources else 'https://bashkortostan.ru/' }}"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="ev-org-link">Сайт организатора (необязательно)</label>
+            <input
+              id="ev-org-link"
+              class="form-control"
+              type="url"
+              name="organization_link"
+              value="{{ editing_event.organization_link if editing_event and editing_event.organization_link else '' }}"
+            />
+          </div>
+
+          <label class="form-checkbox">
+            <input type="checkbox" name="is_free" value="true" {% if editing_event and editing_event.is_free %}checked{% endif %} />
+            <span>Бесплатное мероприятие (вход свободный)</span>
+          </label>
+
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <button class="button button--primary" type="submit">
+              {% if editing_event %}Сохранить изменения{% else %}Создать карточку{% endif %}
+            </button>
+            {% if editing_event %}
+              <a class="button" href="/admin?tab=catalog&status={{ status_filter }}">Отменить редактирование</a>
+            {% endif %}
+          </div>
+        </form>
+      </section>
+
+      <section class="panel-card" aria-labelledby="catalog-list-heading">
+        <h2 id="catalog-list-heading" class="panel-card__heading">
+          Карточки каталога ({{ events_page.total_count }})
+        </h2>
+
+        <form action="/admin" method="get" style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;">
+          <input type="hidden" name="tab" value="catalog" />
+          <input
+            class="form-control"
+            style="flex: 1 1 180px;"
+            type="search"
+            name="query"
+            value="{{ search_query }}"
+            placeholder="Поиск по названию..."
+            aria-label="Поиск карточек"
+          />
+          <select class="form-control" style="width: auto;" name="status" aria-label="Фильтр статуса">
+            <option value="all" {% if status_filter == 'all' %}selected{% endif %}>Все статусы</option>
+            <option value="published" {% if status_filter == 'published' %}selected{% endif %}>Опубликованные</option>
+            <option value="draft" {% if status_filter == 'draft' %}selected{% endif %}>Черновики</option>
+            <option value="canceled" {% if status_filter == 'canceled' %}selected{% endif %}>Отменённые</option>
+          </select>
+          <button class="button button--small" type="submit">Показать</button>
+        </form>
+
+        <div class="table-wrapper" tabindex="0" role="region" aria-label="Таблица мероприятий каталога">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Событие и площадка</th>
+                <th scope="col">Дата</th>
+                <th scope="col">Статус</th>
+                <th scope="col">Действия</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for event in events_page.items %}
+                <tr>
+                  <td data-label="Событие">
+                    <a href="/events/{{ event.identifier }}" target="_blank" rel="noopener noreferrer">
+                      <strong>{{ event.title }}</strong>
+                    </a>
+                    <div style="font-size: 0.82rem; color: var(--ink-secondary);">
+                      {{ event.city }}, {{ event.venue }} · {{ format_price(event) }}
+                    </div>
+                  </td>
+                  <td data-label="Дата">{{ format_date_range(event) }}</td>
+                  <td data-label="Статус">
+                    {% if event.status.value == "canceled" %}
+                      <span class="badge badge--danger">{{ format_status(event.status) }}</span>
+                    {% elif event.status.value == "draft" %}
+                      <span class="badge badge--warning">{{ format_status(event.status) }}</span>
+                    {% else %}
+                      <span class="badge badge--free">{{ format_status(event.status) }}</span>
+                    {% endif %}
+                  </td>
+                  <td data-label="Действия">
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                      <a
+                        class="button button--small"
+                        href="/admin?tab=catalog&status={{ status_filter }}&edit_event={{ event.identifier }}"
+                      >
+                        Редактировать
+                      </a>
+                      {% if event.status.value != "canceled" %}
+                        <button
+                          class="button button--small button--danger"
+                          type="button"
+                          data-open-cancel-dialog
+                          data-cancel-url="/admin/events/{{ event.identifier }}/cancel"
+                          data-event-title="{{ event.title }}"
+                        >
+                          Отменить
+                        </button>
+                      {% endif %}
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  {% elif active_tab == "import" %}
+    <div class="split-grid">
+      <section class="panel-card" aria-labelledby="import-heading">
+        <h2 id="import-heading" class="panel-card__heading">Массовый импорт мероприятий (CSV / JSON)</h2>
+        <p style="margin: 0 0 14px; font-size: 0.92rem; color: var(--ink-secondary);">
+          Идемпотентная загрузка с нормализацией данных, проверкой ссылок и выявлением дубликатов.
+          Повторная загрузка того же файла пропускает неизменённые строки без создания копий.
+        </p>
+
+        <form
+          action="/admin/import"
+          method="post"
+          enctype="multipart/form-data"
+          style="display: flex; flex-direction: column; gap: 12px;"
+        >
+          <div class="form-field">
+            <label class="form-label" for="import-file">Файл мероприятий (.csv или .json, до 5 МБ)</label>
+            <input id="import-file" class="form-control" type="file" name="upload_file" accept=".csv,.json" required />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="import-format">Формат (определяется автоматически, если не выбран)</label>
+            <select id="import-format" class="form-control" name="file_format">
+              <option value="">Определить по расширению / содержимому</option>
+              <option value="csv">CSV (таблица UTF-8)</option>
+              <option value="json">JSON (список объектов)</option>
+            </select>
+          </div>
+
+          <button class="button button--primary" type="submit">Загрузить и импортировать</button>
+        </form>
+      </section>
+
+      <section class="panel-card" aria-labelledby="import-report-heading">
+        <h2 id="import-report-heading" class="panel-card__heading">Отчёт об импорте</h2>
+        {% if import_report %}
+          <div class="kpi-strip" style="margin-bottom: 14px;">
+            <div class="kpi-card">
+              <span class="kpi-card__label">Всего строк</span>
+              <span class="kpi-card__value">{{ import_report.rows_total }}</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-card__label">Добавлено</span>
+              <span class="kpi-card__value">{{ import_report.rows_added }}</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-card__label">Обновлено / без изм.</span>
+              <span class="kpi-card__value">{{ import_report.rows_updated }} / {{ import_report.rows_skipped_unchanged }}</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-card__label">Отклонено</span>
+              <span class="kpi-card__value">{{ import_report.rows_rejected }}</span>
+            </div>
+          </div>
+
+          {% if import_report.failures %}
+            <div class="table-wrapper" tabindex="0" role="region" aria-label="Ошибки строк импорта">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Строка</th>
+                    <th scope="col">Идентификатор / заголовок</th>
+                    <th scope="col">Причина отклонения</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for failure in import_report.failures %}
+                    <tr>
+                      <td data-label="Строка">{{ failure.row_number }}</td>
+                      <td data-label="Запись">{{ failure.external_identifier or '—' }}</td>
+                      <td data-label="Причина">{{ failure.reason }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <div class="alert alert--success">Все записи прошли проверку без ошибок.</div>
+          {% endif %}
+        {% else %}
+          <div class="alert alert--info">
+            Загрузите файл слева, чтобы увидеть детальную статистику добавленных, обновлённых и отклонённых строк.
+          </div>
+        {% endif %}
+      </section>
+    </div>
+  {% elif active_tab == "moderation" %}
+    <section class="panel-card" aria-labelledby="moderation-heading">
+      <h2 id="moderation-heading" class="panel-card__heading">Очередь модерации и защита от инъекций</h2>
+
+      {% if pending_moderation %}
+        <div class="table-wrapper" tabindex="0" role="region" aria-label="Элементы в очереди модерации">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Карточка</th>
+                <th scope="col">Причина и сигнатуры</th>
+                <th scope="col">Создано</th>
+                <th scope="col">Решение</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in pending_moderation %}
+                <tr>
+                  <td data-label="Карточка">
+                    <a href="/events/{{ item.event_identifier }}" target="_blank" rel="noopener noreferrer">
+                      Открыть карточку ↗
+                    </a>
+                    <div style="font-size: 0.78rem; color: var(--ink-muted);">
+                      {{ item.event_identifier }}
+                    </div>
+                  </td>
+                  <td data-label="Причина">
+                    <div>{{ item.reason }}</div>
+                    {% if item.has_suspicious_instructions %}
+                      <div style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px;">
+                        <span class="badge badge--danger">Подозрение на инъекцию</span>
+                        {% for pattern in item.matched_injection_patterns %}
+                          <span class="badge badge--warning">{{ pattern }}</span>
+                        {% endfor %}
+                      </div>
+                    {% endif %}
+                  </td>
+                  <td data-label="Создано">{{ item.created_at.strftime('%d.%m.%Y %H:%M') }}</td>
+                  <td data-label="Решение">
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                      <form action="/admin/moderation/{{ item.moderation_identifier }}/approve" method="post">
+                        <button class="button button--small button--primary" type="submit">Одобрить</button>
+                      </form>
+                      <form action="/admin/moderation/{{ item.moderation_identifier }}/reject" method="post">
+                        <button class="button button--small button--danger" type="submit">Отклонить</button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="alert alert--success">Очередь модерации пуста — все спорные карточки проверены.</div>
+      {% endif %}
+
+      {% if resolved_moderation %}
+        <h3 style="margin: 22px 0 10px; font-size: 1rem;">Недавно одобренные</h3>
+        <ul class="source-list">
+          {% for item in resolved_moderation[:5] %}
+            <li class="source-list__item">
+              <span>{{ item.reason }}</span>
+              <span style="font-size: 0.82rem; color: var(--ink-secondary);">
+                Модератор: {{ item.resolved_by or '—' }}
+              </span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  {% elif active_tab == "feedback" %}
+    <section class="panel-card" aria-labelledby="feedback-tab-heading">
+      <h2 id="feedback-tab-heading" class="panel-card__heading">Обращения пользователей и организаторов</h2>
+
+      {% if feedback_requests %}
+        <div class="table-wrapper" tabindex="0" role="region" aria-label="Таблица обращений">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Дата</th>
+                <th scope="col">Текст обращения</th>
+                <th scope="col">Контакт</th>
+                <th scope="col">Статус и действие</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in feedback_requests %}
+                <tr>
+                  <td data-label="Дата">{{ item.created_at.strftime('%d.%m.%Y %H:%M') }}</td>
+                  <td data-label="Обращение">
+                    <div>{{ item.message_text }}</div>
+                    {% if item.event_identifier %}
+                      <a href="/events/{{ item.event_identifier }}" target="_blank" rel="noopener noreferrer">
+                        Связанная карточка ↗
+                      </a>
+                    {% endif %}
+                  </td>
+                  <td data-label="Контакт">{{ item.contact_hint or '—' }}</td>
+                  <td data-label="Действие">
+                    {% if item.status == 'reviewed' %}
+                      <span class="badge badge--free">Рассмотрено</span>
+                    {% else %}
+                      <form action="/admin/feedback/{{ item.feedback_identifier }}/review" method="post">
+                        <button class="button button--small button--primary" type="submit">
+                          Отметить рассмотренным
+                        </button>
+                      </form>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="alert alert--info">Новых обращений и заявок пока нет.</div>
+      {% endif %}
+    </section>
+  {% else %}
+    <section class="panel-card" aria-labelledby="audit-tab-heading">
+      <h2 id="audit-tab-heading" class="panel-card__heading">Журнал изменений каталога и модерации</h2>
+
+      <div class="table-wrapper" tabindex="0" role="region" aria-label="Журнал аудита">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th scope="col">Время</th>
+              <th scope="col">Инициатор</th>
+              <th scope="col">Действие</th>
+              <th scope="col">Сущность</th>
+              <th scope="col">Детали</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for entry in audit_logs %}
+              <tr>
+                <td data-label="Время">{{ entry.created_at.strftime('%d.%m.%Y %H:%M:%S') }}</td>
+                <td data-label="Инициатор">{{ entry.actor }}</td>
+                <td data-label="Действие">
+                  <span class="badge badge--neutral">{{ entry.action }}</span>
+                </td>
+                <td data-label="Сущность">{{ entry.entity_type }} ({{ entry.entity_identifier[:8] }}…)</td>
+                <td data-label="Детали"><code>{{ entry.changes }}</code></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  <dialog id="cancel-event-dialog" closedby="any" aria-labelledby="cancel-dialog-heading">
+    <div class="dialog__header">
+      <h2 id="cancel-dialog-heading" class="dialog__title">Подтверждение отмены мероприятия</h2>
+      <button
+        class="button button--small button--ghost"
+        type="button"
+        onclick="document.getElementById('cancel-event-dialog').close()"
+        aria-label="Закрыть окно"
+      >
+        ✕
+      </button>
+    </div>
+    <p style="margin: 0 0 12px; color: var(--ink-secondary);">
+      Мероприятие «<strong id="cancel-event-title"></strong>» получит статус <strong>«Отменено»</strong>
+      и исчезнет из общего поиска, но останется доступным по прямой ссылке с предупреждением.
+    </p>
+    <form id="cancel-event-form" method="post" style="display: flex; flex-direction: column; gap: 12px;">
+      <div class="form-field">
+        <label class="form-label" for="cancel-reason-input">Причина отмены (для аудита, необязательно)</label>
+        <input
+          id="cancel-reason-input"
+          class="form-control"
+          type="text"
+          name="reason"
+          placeholder="Например: перенос площадки организатором"
+        />
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;">
+        <button
+          class="button"
+          type="button"
+          onclick="document.getElementById('cancel-event-dialog').close()"
+        >
+          Оставить активным
+        </button>
+        <button class="button button--danger" type="submit">Подтвердить отмену</button>
+      </div>
+    </form>
+  </dialog>
+{% endblock %}
