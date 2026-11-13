@@ -3,8 +3,8 @@ name = "cultural-meridian"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "pydantic>=2.14.3",
-    "pydantic-settings>=2.16.2",
+    "pydantic==2.14.3",
+    "pydantic-settings==2.16.3",
 ]
 
 [dependency-groups]
