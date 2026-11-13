@@ -3,12 +3,12 @@ name = "cultural-meridian"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
-    "alembic>=1.20.1",
-    "asyncpg>=0.32.0",
+    "alembic==1.20.1",
+    "asyncpg==0.32.0",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.3",
-    "pyyaml>=6.0.3",
-    "sqlalchemy[asyncio]>=2.1.8",
+    "pyyaml==6.0.3",
+    "sqlalchemy[asyncio]==2.1.8",
 ]
 
 [dependency-groups]
@@ -17,6 +17,9 @@ dev = [
     "mypy==2.4.1",
     "ruff==0.17.5",
     "pip-audit==2.10.1",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+    "types-pyyaml==6.0.12.20261113",
 ]
 
 [tool.ruff]
@@ -106,3 +109,12 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = []
 ignore_missing_imports = true
+
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "integration: интеграционные тесты с PostgreSQL 17",
+]
