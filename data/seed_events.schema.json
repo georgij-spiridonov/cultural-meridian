@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cultural-meridian.local/schemas/seed_events.schema.json",
+  "title": "Схема файла стартового наполнения событий Республики Башкортостан (data/seed_events.json)",
+  "description": "Формат файла начальной загрузки культурных мероприятий из публичного сервиса в PostgreSQL через модуль src.entrypoints.command_line.seed. Допускается объект с полем events (рекомендуется) или плоский JSON-массив событий.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events"],
+      "properties": {
+        "$schema": {
+          "type": "string",
+          "description": "Необязательная ссылка на JSON Schema (например, ./seed_events.schema.json)."
+        },
+        "events": {
+          "type": "array",
+          "description": "Список карточек мероприятий для идемпотентной загрузки в каталог.",
+          "items": {
+            "$ref": "#/$defs/SeedEventItem"
+          }
+        }
+      }
+    },
+    {
+      "type": "array",
+      "description": "Альтернативный плоский массив карточек мероприятий.",
+      "items": {
+        "$ref": "#/$defs/SeedEventItem"
+      }
+    }
+  ],
+  "$defs": {
+    "SourceType": {
+      "type": "string",
+      "enum": ["manual", "import_file", "rss", "api", "webpage"],
+      "description": "Тип источника сведений о мероприятии."
+    },
+    "EventCategory": {
+      "type": "string",
+      "enum": ["concert", "spectacle", "exhibition", "festival", "cinema", "excursion", "other"],
+      "description": "Код категории мероприятия из таблицы categories."
+    },
+    "EventStatus": {
+      "type": "string",
+      "enum": ["published", "draft", "canceled"],
+      "description": "Статус публикации карточки."
+    },
+    "SeedEventSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_name", "source_type", "source_url"],
+      "properties": {
+        "source_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Человекочитаемое наименование источника (например, «Культура.РФ» или «Афиша Уфы»)."
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType"
+        },
+        "source_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Прямая ссылка на страницу или API-запись мероприятия у источника."
+        },
+        "source_hash": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Контрольная сумма записи источника; если не задана, вычисляется детерминированно."
+        },
+        "verified_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Временная метка последней проверки доступности ссылки источника (ISO 8601)."
+        }
+      }
+    },
+    "SeedEventItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "category", "date_start", "city", "venue"],
+      "anyOf": [
+        {
+          "required": ["source_url"]
+        },
+        {
+          "required": ["sources"]
+        }
+      ],
+      "properties": {
+        "identifier": {
+          "type": ["string", "null"],
+          "format": "uuid",
+          "description": "UUID карточки; если не указан, вычисляется детерминированно (UUID v5) для идемпотентного повторного сидинга."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "Название мероприятия в формулировке первоисточника."
+        },
+        "normalized_title": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "Необязательное нормализованное название; по умолчанию вычисляется через domain.services.normalization.normalize_title."
+        },
+        "category": {
+          "$ref": "#/$defs/EventCategory"
+        },
+        "tags": {
+          "type": "array",
+          "description": "Тематические метки (например: джаз, дети, классика, фолк).",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "default": []
+        },
+        "date_start": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Дата и время начала в ISO 8601 (рекомендуется с часовым поясом +05:00; без смещения считается Asia/Yekaterinburg)."
+        },
+        "date_end": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Дата и время окончания в ISO 8601 (не ранее date_start)."
+        },
+        "duration_minutes": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Длительность мероприятия в минутах."
+        },
+        "city": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Город или населённый пункт Республики Башкортостан (нормализуется по configuration/venues_coordinates.yaml)."
+        },
+        "venue": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Название площадки проведения (обогащается адресом и координатами из configuration/venues_coordinates.yaml при совпадении)."
+        },
+        "address": {
+          "type": ["string", "null"],
+          "maxLength": 500,
+          "description": "Почтовый адрес площадки; если null или не задан, подставляется из справочника площадок при наличии."
+        },
+        "latitude": {
+          "type": ["number", "null"],
+          "minimum": -90,
+          "maximum": 90,
+          "description": "Широта площадки (задаётся только в паре с longitude; при отсутствии подставляется из справочника площадок)."
+        },
+        "longitude": {
+          "type": ["number", "null"],
+          "minimum": -180,
+          "maximum": 180,
+          "description": "Долгота площадки (задаётся только в паре с latitude; при отсутствии подставляется из справочника площадок)."
+        },
+        "description": {
+          "type": "string",
+          "default": "",
+          "description": "Текстовое описание мероприятия."
+        },
+        "price_minimum": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Минимальная цена билета в рублях (для бесплатных событий — 0 или null)."
+        },
+        "price_maximum": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Максимальная цена билета в рублях (не меньше price_minimum)."
+        },
+        "is_free": {
+          "type": "boolean",
+          "default": false,
+          "description": "Признак бесплатного входа."
+        },
+        "age_limit": {
+          "type": "integer",
+          "enum": [0, 6, 12, 16, 18],
+          "default": 0,
+          "description": "Возрастной рейтинг (0, 6, 12, 16 или 18)."
+        },
+        "language": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "Язык проведения мероприятия (например, «русский», «башкирский», «татарский»)."
+        },
+        "organization_link": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "maxLength": 1024,
+          "description": "Ссылка на официальную страницу организатора или покупку билетов."
+        },
+        "source_name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Название основного источника публикации; по умолчанию извлекается из домена source_url или первого элемента sources."
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType",
+          "default": "api"
+        },
+        "source_url": {
+          "type": ["string", "null"],
+          "format": "uri",
+          "maxLength": 1024,
+          "description": "Прямая ссылка на первоисточник события."
+        },
+        "source_hash": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "Хэш исходной записи; если не задан, вычисляется детерминированно."
+        },
+        "verified_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "Временная метка последней проверки ссылки (ISO 8601)."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "default": 1.0,
+          "description": "Оценка уверенности данных (0.0..1.0)."
+        },
+        "status": {
+          "$ref": "#/$defs/EventStatus",
+          "default": "published"
+        },
+        "deduplication_key": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "description": "Необязательный ключ дедупликации; при отсутствии вычисляется детерминированно по названию, дате, городу и площадке."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Список подтверждённых источников события (первый элемент считается основным, остальные — дополнительными после дедупликации).",
+          "items": {
+            "$ref": "#/$defs/SeedEventSource"
+          }
+        }
+      }
+    }
+  }
+}
