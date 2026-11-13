@@ -1,0 +1,24 @@
+services:
+  database:
+    image: postgres:17-alpine
+    container_name: cultural-meridian-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-cultural_meridian}
+      POSTGRES_USER: ${DATABASE_USER:-cultural_meridian}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-cultural_meridian_dev}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C.UTF-8"
+      TZ: Asia/Yekaterinburg
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-cultural_meridian} -d ${DATABASE_NAME:-cultural_meridian}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
