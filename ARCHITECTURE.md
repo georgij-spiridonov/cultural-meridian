@@ -171,7 +171,7 @@ cultural-meridian/
 │   │   │   └── resolver.py                        # Справочник coordinates + опциональный внешний запрос с фоллбэком
 │   │   ├── language_model/                        # Универсальный ИИ-контур поверх OpenAI Agents SDK
 │   │   │   ├── __init__.py
-│   │   │   ├── agent_orchestrator.py              # Реализация AgentOrchestratorPort (max_turns=5)
+│   │   │   ├── agent_orchestrator.py              # Реализация AgentOrchestratorPort (не более 5 вызовов инструментов на ответ)
 │   │   │   ├── client.py                          # Фабрика OpenAI-совместимого клиента (замена модели 1 строкой в .env)
 │   │   │   ├── cost_calculator.py                 # Расчёт стоимости вызова в рублях по таблице тарифов
 │   │   │   ├── guardrails.py                      # Input/Output guardrails против утечки промпта и галлюцинаций
@@ -189,7 +189,7 @@ cultural-meridian/
 │       ├── bootstrap.py                           # Единый Composition Root и управление жизненным циклом ресурсов
 │       ├── background_worker/
 │       │   ├── __init__.py
-│       │   └── runner.py                          # Планировщик регулярного сбора и проверки источников
+│       │   └── runner.py                          # Регулярный сбор и проверка источников, ежедневная сводка подписок
 │       ├── command_line/
 │       │   ├── __init__.py
 │       │   ├── evaluate.py                        # Прогон ≥ 65 запросов, сравнение с baseline и отчёт по метрикам 9.2
@@ -268,9 +268,9 @@ sequenceDiagram
         Orchestrator->>DialogRepo: Сохранить реплику и трассу (fallback_used=True)
         Orchestrator-->>Entrypoint: Карточки + уведомление о резервном режиме
     else Бюджет в норме и модель активна
-        Orchestrator->>AgentAdapter: Запуск агента (max_turns=5, input/output guardrails)
+        Orchestrator->>AgentAdapter: Запуск агента (лимит 5 вызовов инструментов, input/output защиты)
         loop До 5 вызовов инструментов
-            AgentAdapter->>Tools: search_events / get_event / plan_weekend / prepare_*
+            AgentAdapter->>Tools: search_events / get_event / find_similar / get_venue_schedule / plan_weekend / subscribe / save_feedback
             Tools-->>AgentAdapter: Строгий JSON + фиксация allowed_event_ids
         end
         AgentAdapter-->>Orchestrator: Структурированный ответ + токены + трасса
@@ -350,22 +350,25 @@ classDiagram
 
 ## 7. База данных (PostgreSQL 17) и контракты данных
 
+PostgreSQL 17 используется и разворачивается только локально: приложение подключается к нему через переменные окружения `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, схемой владеют SQLAlchemy и Alembic, облачные хостинги баз данных не используются.
+
 В стартовой миграции Alembic активируются расширения **`pg_trgm`** (для устойчивости к опечаткам вроде *«стерлитакмае»*) и **`unaccent`**.
 
 1. **Сырые данные и источники:**
    - `raw_events`: хранит необработанный JSON/текст внешнего источника (`source_name`, `external_identifier`, `source_url`, `source_hash`, `raw_payload` JSONB, `fetched_at`, `normalization_status`), что позволяет переигрывать нормализацию без повторного обхода сайтов.
 2. **Нормализованный каталог (`events`):**
-   - Содержит все 24 поля схемы из раздела 8.1 ТЗ (`id`, `title`, `normalized_title`, `category`, `tags`, `date_start`, `date_end`, `duration_min`, `city`, `venue`, `address`, `lat`, `lon`, `description`, `price_min`, `price_max`, `is_free`, `age_limit`, `language`, `org_link`, `source_url`, `source_type`, `source_hash`, `verified_at`, `confidence`, `status`, `dedup_key`, `created_at`, `updated_at`).
+   - Содержит все 29 полей схемы из раздела 8.1 ТЗ (`id`, `title`, `normalized_title`, `category`, `tags`, `date_start`, `date_end`, `duration_min`, `city`, `venue`, `address`, `lat`, `lon`, `description`, `price_min`, `price_max`, `is_free`, `age_limit`, `language`, `org_link`, `source_url`, `source_type`, `source_hash`, `verified_at`, `confidence`, `status`, `dedup_key`, `created_at`, `updated_at`).
    - Индексы: `GIN` с `gin_trgm_ops` по `normalized_title`, `city`, `venue`; `GIN` по `to_tsvector('russian', title || ' ' || description)`; составные B-Tree индексы по `(status, city, date_start)` и `(dedup_key)`.
    - Отменённые события (`status = 'canceled'`) автоматически исключаются из публичного поиска и планировщика, но открываются по прямой ссылке с явным предупреждением об отмене.
 3. **Связь источников (`event_sources`):**
    - При сведении дубликатов из разных источников в одну карточку сохраняются все подтверждённые источники (`source_name`, `source_url`, `source_hash`, `verified_at`), и их список отображается на карточке события.
 4. **Сопроводительные таблицы:**
-   - `cities`, `venues`, `categories` — нормализованные справочники.
+   - `cities`, `venues`, `categories` — нормализованные справочники; категории имеют латинский код для API и адресной строки и русское название.
    - `moderation_queue` — спорные карточки, потенциальные дубли и записи с флагом подозрительного контента.
    - `audit_logs` — журнал изменений (`actor`, `action`, `entity_type`, `entity_id`, `changes_json`, `created_at`).
+   - `moderators` — учётные записи модераторов для входа в `/admin`; на них ссылается `audit_logs.actor`.
    - `subscriptions` — минимальные данные подписки (`channel`, `subscriber_identifier`, `city`, `category`, `created_at`); при отписке запись удаляется физически (`DELETE`).
-   - `feedback_requests` — заявки организаторов с защитой от спама.
+   - `feedback_requests` — заявки организаторов с защитой от спама; контакт необязателен.
    - `dialog_sessions`, `dialog_messages`, `pending_actions` — история диалога (≥ 5 реплик) и токены подтверждения изменяющих действий.
    - `agent_traces` — полная трасса каждого ответа агента (исходный запрос, план, инструменты и аргументы, идентификаторы записей-оснований, задержка, токены, стоимость в ₽, модель, версия промпта).
    - `llm_usage_daily` — суточный учёт затрат в ₽ на пользователя и глобально для автоматического переключения в резервный режим.
@@ -375,18 +378,21 @@ classDiagram
 ## 8. Универсальная конфигурация моделей, безопасность и логирование
 
 ### 8.1. Замена моделей одной строкой в `.env`
-`LanguageModelSettings` в `src/core/configuration.py` работает с любым OpenAI-совместимым эндпоинтом через `AsyncOpenAI(base_url=..., api_key=...)` и `OpenAIChatCompletionsModel` из `openai-agents`. Переключение между быстрыми не-OpenAI моделями (например, `gemini-3.5-flash-lite`, `gemini-4-hydrogen`, `claude-sonnet-5.5` или локальным `vllm`) выполняется изменением одной переменной в `.env` без правки кода:
+`LanguageModelSettings` в `src/core/configuration.py` работает с любым OpenAI-совместимым эндпоинтом через `AsyncOpenAI(base_url=..., api_key=...)` и `OpenAIChatCompletionsModel` из `openai-agents`. Провайдер по умолчанию — OpenRouter. Переключение модели выполняется изменением переменной в `.env` без правки кода:
 - `LANGUAGE_MODEL_BASE_URL`
 - `LANGUAGE_MODEL_API_KEY`
 - `LANGUAGE_MODEL_PRIMARY` (основная диалоговая модель)
 - `LANGUAGE_MODEL_FAST` (лёгкая модель для сложной гибридной нормализации и опциональной оценки объяснений)
 - `LANGUAGE_MODEL_PRICING_JSON` (тарифы в рублях за 1M токенов для точного расчёта стоимости диалога)
 
+Экспорт трасс SDK в OpenAI отключён, трасса пишется в `agent_traces`. Состояние доступности модели и ограничение частоты запросов хранятся в памяти процесса, отдельное хранилище (Redis) не используется; суточный бюджет хранится в `llm_usage_daily`.
+
 ### 8.2. Защита от инъекций, галлюцинаций и несанкционированных мутаций
 1. **Изоляция недоверенных данных:** описания событий из внешних источников проходят через `SanitizationService` (обнаружение характерных директив перехвата роли/инструкций) и передаются в модель строго внутри тегов `<untrusted_event_data>...</untrusted_event_data>`.
 2. **Пост-валидация фактов (0 выдуманных событий):** на каждом шаге диалога фиксируется множество UUID событий, возвращённых инструментами (`allowed_event_ids`). Если структурированный ответ агента ссылается на идентификатор вне `allowed_event_ids` — ссылка отбрасывается, а ответ пересобирается детерминированно из подтверждённых записей.
-3. **Двухшаговое подтверждение изменяющих действий:** инструменты `prepare_subscribe` и `prepare_feedback` только регистрируют `pending_action` и возвращают пользователю кнопки/запрос подтверждения. Запись в БД происходит исключительно после явного подтверждения пользователем.
-4. **Обязательный дисклеймер:** веб-страницы, виджет и Telegram-бот явно информируют пользователя о том, что сервис является независимым информационным контуром афиши и не подменяет официальный портал Министерства культуры РБ.
+3. **Двухшаговое подтверждение изменяющих действий:** инструменты `subscribe` и `save_feedback` (имена из раздела 7.2 ТЗ) только регистрируют `pending_action` и возвращают пользователю кнопки/запрос подтверждения. Запись в БД происходит исключительно после явного подтверждения пользователем.
+4. **Лимит шагов:** `max_turns` SDK считает вызовы модели, а не инструментов, поэтому не более пяти вызовов инструментов на ответ обеспечивает собственный счётчик в контексте запуска агента.
+5. **Обязательный дисклеймер:** веб-страницы, виджет и Telegram-бот явно информируют пользователя о том, что сервис является независимым информационным контуром афиши и не подменяет официальный портал Министерства культуры РБ.
 
 ### 8.3. Логгер (`src/core/logger.py`)
 Реализуется по образцу эталонного проекта (`dictConfig` на основе `RootLoggerConfiguration` и `LoggingConfiguration` в `TypedDict`) с добавлением `RequestIdentifierFilter` через `contextvars.ContextVar`:

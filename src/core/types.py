@@ -34,13 +34,13 @@ class EventCategory(StrEnum):
         OTHER: Прочее культурное мероприятие.
     """
 
-    CONCERT = "концерт"
-    SPECTACLE = "спектакль"
-    EXHIBITION = "выставка"
-    FESTIVAL = "фестиваль"
-    CINEMA = "кино"
-    EXCURSION = "экскурсия"
-    OTHER = "другое"
+    CONCERT = "concert"
+    SPECTACLE = "spectacle"
+    EXHIBITION = "exhibition"
+    FESTIVAL = "festival"
+    CINEMA = "cinema"
+    EXCURSION = "excursion"
+    OTHER = "other"
 
 
 class EventStatus(StrEnum):

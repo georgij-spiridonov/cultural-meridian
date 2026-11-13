@@ -20,11 +20,35 @@ __all__ = [
     "FeedbackStatus",
     "ModerationItem",
     "ModerationStatus",
+    "ModeratorAccount",
     "SubscriptionRecord",
 ]
 
 type ModerationStatus = Literal["pending", "approved", "rejected"]
 type FeedbackStatus = Literal["new", "reviewed"]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModeratorAccount:
+    """Учётная запись модератора для входа в административный интерфейс `/admin`.
+
+    Attributes:
+        moderator_identifier: Уникальный идентификатор модератора.
+        username: Логин модератора для аутентификации и фиксации в `audit_logs.actor`.
+        display_name: Отображаемое имя модератора.
+        password_hash: Хэш пароля модератора.
+        is_active: Признак активности учётной записи.
+        created_at: Временная метка создания учётной записи.
+        last_login_at: Временная метка последнего успешного входа.
+    """
+
+    moderator_identifier: UUID
+    username: str
+    display_name: str
+    password_hash: str
+    is_active: bool = True
+    created_at: datetime
+    last_login_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

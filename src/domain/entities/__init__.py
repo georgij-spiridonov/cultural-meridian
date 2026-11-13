@@ -6,6 +6,7 @@ from src.domain.entities.administration import (
     FeedbackStatus,
     ModerationItem,
     ModerationStatus,
+    ModeratorAccount,
     SubscriptionRecord,
 )
 from src.domain.entities.dialog import (
@@ -74,6 +75,7 @@ __all__ = [
     "LinkCheckResult",
     "ModerationItem",
     "ModerationStatus",
+    "ModeratorAccount",
     "PendingAction",
     "PendingActionType",
     "RawEventRecord",
