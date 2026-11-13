@@ -7,10 +7,12 @@ from src.core.configuration import (
     ApplicationSettings,
     DatabaseSettings,
     LoggingSettings,
+    TelegramSettings,
     WebSettings,
     get_application_settings,
     get_database_settings,
     get_logging_settings,
+    get_telegram_settings,
     get_web_settings,
 )
 from src.core.logger import get_logger, setup_logger
@@ -36,6 +38,7 @@ class ApplicationContainer:
         database_settings: Параметры подключения к PostgreSQL 17.
         logging_settings: Настройки структурного логирования.
         web_settings: Настройки веб-сервера, REST API и сессий модератора.
+        telegram_settings: Настройки Telegram-бота и параметров диалоговой выдачи.
         database_engine_manager: Менеджер пула подключений и жизненного цикла SQLAlchemy.
         event_repository: Репозиторий каталога мероприятий и справочников.
         raw_event_repository: Репозиторий сырых записей внешних источников.
@@ -51,6 +54,7 @@ class ApplicationContainer:
     database_settings: DatabaseSettings
     logging_settings: LoggingSettings
     web_settings: WebSettings
+    telegram_settings: TelegramSettings
     database_engine_manager: DatabaseEngineManager
     event_repository: PostgreSqlEventRepository
     raw_event_repository: PostgreSqlRawEventRepository
@@ -79,6 +83,7 @@ def build_application_container(
     database_settings: DatabaseSettings | None = None,
     logging_settings: LoggingSettings | None = None,
     web_settings: WebSettings | None = None,
+    telegram_settings: TelegramSettings | None = None,
 ) -> ApplicationContainer:
     """Собирает граф зависимостей приложения поверх настроек окружения.
 
@@ -87,6 +92,7 @@ def build_application_container(
         database_settings: Явная переопределённая конфигурация PostgreSQL.
         logging_settings: Явная переопределённая конфигурация логирования.
         web_settings: Явная переопределённая конфигурация веб-интерфейса.
+        telegram_settings: Явная переопределённая конфигурация Telegram-бота.
 
     Returns:
         Полностью настроенный экземпляр `ApplicationContainer`.
@@ -95,6 +101,7 @@ def build_application_container(
     resolved_database_settings = database_settings or get_database_settings()
     resolved_logging_settings = logging_settings or get_logging_settings()
     resolved_web_settings = web_settings or get_web_settings()
+    resolved_telegram_settings = telegram_settings or get_telegram_settings()
 
     engine_manager = DatabaseEngineManager(resolved_database_settings)
 
@@ -119,6 +126,7 @@ def build_application_container(
         database_settings=resolved_database_settings,
         logging_settings=resolved_logging_settings,
         web_settings=resolved_web_settings,
+        telegram_settings=resolved_telegram_settings,
         database_engine_manager=engine_manager,
         event_repository=event_repository,
         raw_event_repository=raw_event_repository,

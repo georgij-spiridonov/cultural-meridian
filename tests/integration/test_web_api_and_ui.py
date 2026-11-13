@@ -9,7 +9,13 @@ import pytest
 import pytest_asyncio
 
 from src.application import AdministrationService, EventImportService, EventSearchService, SubscriptionService
-from src.core.configuration import WebSettings, get_application_settings, get_database_settings, get_logging_settings
+from src.core.configuration import (
+    WebSettings,
+    get_application_settings,
+    get_database_settings,
+    get_logging_settings,
+    get_telegram_settings,
+)
 from src.domain.services import BASHKORTOSTAN_TIMEZONE
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.command_line.seed import DEFAULT_VENUES_CATALOG_PATH, seed_reference_catalog
@@ -105,6 +111,7 @@ async def web_container(database_engine_manager: DatabaseEngineManager) -> Appli
         database_settings=get_database_settings(),
         logging_settings=get_logging_settings(),
         web_settings=web_settings,
+        telegram_settings=get_telegram_settings(),
         database_engine_manager=database_engine_manager,
         event_repository=event_repository,
         raw_event_repository=raw_event_repository,

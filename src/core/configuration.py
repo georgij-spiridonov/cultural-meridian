@@ -15,10 +15,12 @@ __all__ = [
     "ApplicationSettings",
     "DatabaseSettings",
     "LoggingSettings",
+    "TelegramSettings",
     "WebSettings",
     "get_application_settings",
     "get_database_settings",
     "get_logging_settings",
+    "get_telegram_settings",
     "get_web_settings",
 ]
 
@@ -173,6 +175,58 @@ class WebSettings(BaseSettings):
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = Field(default=120, ge=10)
     FEEDBACK_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1)
     ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
+
+
+class TelegramSettings(BaseSettings):
+    """Настройки Telegram-бота на базе библиотеки `aiogram` v3 (long polling).
+
+    Attributes:
+        BOT_TOKEN: Токен Telegram-бота (при пустом значении бот запускается в режиме безопасного ожидания).
+        PAGE_SIZE: Количество карточек мероприятий на одной странице выдачи в чате.
+        IDLE_POLL_SECONDS: Интервал проверки сигнала остановки в режиме безопасного ожидания без токена.
+        PUBLIC_WEB_BASE_URL: Публичный базовый URL веб-каталога для кнопок перехода на сайт (если настроен).
+        DIALOG_HISTORY_LIMIT: Количество последних реплик, загружаемых из диалоговой сессии.
+        PENDING_ACTION_LIFETIME_SECONDS: Время жизни запроса на подтверждение изменяющего действия в секундах.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="TELEGRAM_",
+        extra="ignore",
+        env_ignore_empty=True,
+        frozen=True,
+    )
+
+    BOT_TOKEN: str = ""
+    PAGE_SIZE: int = Field(default=5, ge=1, le=20)
+    IDLE_POLL_SECONDS: float = Field(default=5.0, gt=0.0)
+    PUBLIC_WEB_BASE_URL: str = ""
+    DIALOG_HISTORY_LIMIT: int = Field(default=10, ge=5, le=50)
+    PENDING_ACTION_LIFETIME_SECONDS: int = Field(default=600, ge=60, le=86400)
+
+    @field_validator("BOT_TOKEN", "PUBLIC_WEB_BASE_URL", mode="after")
+    @classmethod
+    def strip_text_option(cls, value: str) -> str:
+        """Удаляет крайние пробелы и завершающий слеш у строковых параметров конфигурации.
+
+        Arguments:
+            value: Исходное строковое значение параметра.
+
+        Returns:
+            Нормализованная строка без крайних пробелов.
+        """
+        return value.strip().rstrip("/")
+
+
+@lru_cache
+def get_telegram_settings() -> TelegramSettings:
+    """Возвращает кэшированный экземпляр настроек Telegram-бота.
+
+    Returns:
+        Неизменяемые настройки Telegram-бота.
+    """
+    return TelegramSettings()
 
 
 @lru_cache
