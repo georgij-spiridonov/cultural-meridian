@@ -3,8 +3,10 @@
 from src.core.configuration import (
     PROJECT_ROOT,
     ApplicationSettings,
+    DatabaseSettings,
     LoggingSettings,
     get_application_settings,
+    get_database_settings,
     get_logging_settings,
 )
 from src.core.exceptions import ApplicationException, DomainException, InfrastructureException
@@ -21,6 +23,7 @@ __all__ = [
     "PROJECT_ROOT",
     "ApplicationException",
     "ApplicationSettings",
+    "DatabaseSettings",
     "DialogChannel",
     "DomainException",
     "EventCategory",
@@ -30,6 +33,7 @@ __all__ = [
     "RealCollection",
     "SourceType",
     "get_application_settings",
+    "get_database_settings",
     "get_logger",
     "get_logging_settings",
     "get_request_identifier",
