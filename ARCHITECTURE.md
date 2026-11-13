@@ -381,10 +381,9 @@ PostgreSQL 17 используется и разворачивается тол�
 `LanguageModelSettings` в `src/core/configuration.py` работает с любым OpenAI-совместимым эндпоинтом через `AsyncOpenAI(base_url=..., api_key=...)` и `OpenAIChatCompletionsModel` из `openai-agents`. Провайдер по умолчанию — OpenRouter. Переключение модели выполняется изменением переменной в `.env` без правки кода:
 - `LANGUAGE_MODEL_BASE_URL`
 - `LANGUAGE_MODEL_API_KEY`
-- `LANGUAGE_MODEL_PRIMARY` (основная диалоговая модель, по умолчанию `google/gemini-3.8-flash`)
-- `LANGUAGE_MODEL_FAST` (лёгкая модель для сложной гибридной нормализации и опциональной оценки объяснений, по умолчанию `google/gemini-3.1-flash-lite`)
-- `LANGUAGE_MODEL_PRICING_JSON` (тарифы моделей в долларах за 1M токенов)
-- `LANGUAGE_MODEL_USD_RUB_RATE` (фиксированный курс для расчёта стоимости диалога в рублях)
+- `LANGUAGE_MODEL_PRIMARY` (основная диалоговая модель)
+- `LANGUAGE_MODEL_FAST` (лёгкая модель для сложной гибридной нормализации и опциональной оценки объяснений)
+- `LANGUAGE_MODEL_PRICING_JSON` (тарифы в рублях за 1M токенов для точного расчёта стоимости диалога)
 
 Экспорт трасс SDK в OpenAI отключён, трасса пишется в `agent_traces`. Состояние доступности модели и ограничение частоты запросов хранятся в памяти процесса, отдельное хранилище (Redis) не используется; суточный бюджет хранится в `llm_usage_daily`.
 
