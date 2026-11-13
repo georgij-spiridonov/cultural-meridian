@@ -1,0 +1,64 @@
+name: Новая функциональность
+description: Предложение нового сценария, доменного порта, адаптера, инструмента агента или улучшения интерфейса
+title: "[Функция]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Используйте шаблон для постановки новой задачи.
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Постановка задачи и мотивация
+      description: Зачем нужна эта возможность и какому пункту ТЗ Уровня 4 она соответствует?
+      placeholder: Опишите пользовательскую или инженерную потребность...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое решение
+      description: Кратко опишите поведение функции и ожидаемый результат.
+      placeholder: Опишите новый контракт порта, сценарий использования или элемент интерфейса...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: layers
+    attributes:
+      label: Затрагиваемые слои архитектуры
+      description: Какие слои будут созданы или изменены?
+      options:
+        - label: "**Ядро (`src/core`)** — настройки, логгер, `ApplicationException` или типы"
+        - label: "**Домен (`src/domain`)** — сущности, `Protocol`-порты, чистые сервисы или доменные исключения"
+        - label: "**Сценарии использования (`src/application`)** — поиск, агент, планировщик, сбор, импорт или модерация"
+        - label: "**Инфраструктура (`src/infrastructure`)** — PostgreSQL 17, языковые модели, источники данных или геолокация"
+        - label: "**Точки входа (`src/entrypoints`)** — веб-сервис, `api.py`, виджет, Telegram-бот, воркер или консольные команды"
+        - label: "**Тесты и оценка (`tests`, `evaluation`)** — автотесты или контрольные запросы"
+        - label: "**Конфигурация и окружение** — `.env.example`, `configuration/`, `migrations/`, `docker-compose.yml`"
+
+  - type: textarea
+    id: design_contracts
+    attributes:
+      label: Контракты и границы
+      description: Укажите новые протоколы портов, неизменяемые сущности, трансляцию ошибок и резервный режим при отказе.
+      placeholder: |
+        - Порт (`src/domain/ports/...`): ...
+        - Сущности (`src/domain/entities.py`): ...
+        - Обработка ошибок и резервный режим: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Критерии приёмки и проверка
+      description: Какие тесты, метрики или ручные проверки подтвердят готовность задачи?
+      placeholder: |
+        - Unit / Integration тесты: ...
+        - Проходят `ruff check`, `ruff format --check`, `mypy src`
+    validations:
+      required: false

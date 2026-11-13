@@ -1,0 +1,95 @@
+name: Сообщение об ошибке
+description: Сообщить о дефекте, сбое контракта, галлюцинации агента или некорректной обработке исключений
+title: "[Ошибка]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите проблему максимально точно, чтобы её можно было воспроизвести, локализовать и быстро устранить.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Суть ошибки
+      description: Чёткое и краткое описание дефекта или неожиданного поведения.
+      placeholder: Опишите, что происходит и почему это нарушает ожидаемый контракт...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: layers
+    attributes:
+      label: Затронутые слои архитектуры
+      description: Укажите, какие слои затронуты ошибкой.
+      options:
+        - label: "**Ядро (`src/core`)** — настройки, логгер, `ApplicationException` или типы"
+        - label: "**Домен (`src/domain`)** — сущности, `Protocol`-порты, чистые сервисы или доменные исключения"
+        - label: "**Сценарии использования (`src/application`)** — поиск, агент, планировщик, сбор, импорт или модерация"
+        - label: "**Инфраструктура (`src/infrastructure`)** — PostgreSQL 17, языковые модели, источники данных или геолокация"
+        - label: "**Точки входа (`src/entrypoints`)** — веб-сервис, `api.py`, виджет, Telegram-бот, воркер или консольные команды"
+        - label: "**Тесты и оценка (`tests`, `evaluation`)** — автотесты или прогон метрик"
+        - label: "**Конфигурация и окружение** — `.env.example`, `configuration/`, `migrations/`, `docker-compose.yml`"
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Критичность
+      description: Насколько сильно ошибка влияет на работу сервиса и метрики Уровня 4?
+      options:
+        - "Критическая — выдуманное событие, выполнение инъекции, утечка промпта/ПДн или падение сервиса"
+        - "Высокая — сломан ключевой сценарий, неверная трансляция исключений или не работает резервный режим"
+        - "Средняя — ошибка на граничном случае, неточная фильтрация или сбой отдельного источника"
+        - "Низкая — косметический дефект вёрстки/текста, форматирование лога или неточность типизации"
+      default: 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Шаги воспроизведения
+      description: Приведите минимальные воспроизводимые шаги, запрос пользователя или вызов API.
+      placeholder: |
+        1. Запустить сервис через `docker compose up`
+        2. Отправить запрос `...`
+        3. Наблюдать ошибку / неверный ответ
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Ожидаемое поведение
+      description: Опишите поведение согласно ТЗ и контракту в `ARCHITECTURE.md`.
+      placeholder: Ожидается, что...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Фактический результат и лог ошибки
+      description: Вставьте фактический ответ, статус HTTP или трассировку (убедитесь, что секреты и токены удалены).
+      render: text
+      placeholder: |
+        Вставьте вывод лога или трассировку без секретов...
+    validations:
+      required: true
+
+  - type: textarea
+    id: root_cause
+    attributes:
+      label: Предполагаемая причина и исправление (необязательно)
+      description: Если причина уже найдена, укажите конкретный модуль, класс или метод.
+      placeholder: Например, в `src/infrastructure/...` не перехватывается таймаут...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверка перед отправкой
+      options:
+        - label: Подтверждаю, что в отчёте нет ключей доступа, токенов и персональных данных.
+          required: true

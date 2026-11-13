@@ -1,0 +1,39 @@
+name: Рефакторинг и архитектура
+description: Улучшение структуры модулей, разделение ответственности или усиление типизации без изменения поведения
+title: "[Рефакторинг]: "
+labels: ["refactor"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Шаблон для задач по выравниванию границ портов, дроблению крупных модулей и устранению сокращений или дублирования.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Область рефакторинга и проблема
+      description: Какие модули затрагиваются и почему текущую структуру нужно улучшить?
+      placeholder: Например, выделение отдельной ответственности из модуля ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Целевая структура и инварианты
+      description: Опишите целевое разбиение и подтвердите сохранение публичных контрактов и тестов.
+      placeholder: |
+        - Разделить модуль на ...
+        - Сохранить совместимость `Protocol`-портов и прохождение всех тестов
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Гарантии качества
+      options:
+        - label: Внешнее поведение API, бота и агента не меняется (или согласовано отдельно).
+          required: true
+        - label: Будут пройдены `ruff check`, `ruff format --check`, `mypy src` и `pytest`.
+          required: true

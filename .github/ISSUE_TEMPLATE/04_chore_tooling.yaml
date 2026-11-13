@@ -1,0 +1,24 @@
+name: Инфраструктура и инструменты
+description: Задачи по Docker, CI/CD, pre-commit, зависимостям, миграциям или скриптам оценки
+title: "[Инфраструктура]: "
+labels: ["chore"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Описание задачи
+      description: Что необходимо настроить или обновить в окружении, сборке, CI или инструментах качества?
+      placeholder: Например, обновление `docker-compose.yml`, настройка проверки `eval` или миграций...
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Способ проверки
+      description: Какая команда или сценарий подтвердит, что задача выполнена корректно?
+      placeholder: |
+        - `docker compose up --build` на чистой среде
+        - `uv lock --check && uv run ruff check && uv run mypy src`
+    validations:
+      required: true
