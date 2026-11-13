@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Вход модератора — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <div style="max-width: 460px; margin: 24px auto;">
+    <section class="panel-card" aria-labelledby="admin-login-heading">
+      <p class="hero-banner__eyebrow">Служебный раздел</p>
+      <h1 id="admin-login-heading" class="panel-card__heading" style="font-size: 1.4rem;">
+        Вход в панель модератора
+      </h1>
+      <p style="margin: 0 0 16px; font-size: 0.92rem; color: var(--ink-secondary);">
+        Доступ к ручному редактированию каталога, массовому импорту, проверке спорных карточек и журналу аудита.
+      </p>
+
+      {% if error_message %}
+        <div class="alert alert--danger" role="alert">
+          {{ error_message }}
+        </div>
+      {% endif %}
+
+      <form action="/admin/login" method="post" style="display: flex; flex-direction: column; gap: 14px;">
+        <div class="form-field">
+          <label class="form-label" for="login-username">Логин модератора</label>
+          <input
+            id="login-username"
+            class="form-control"
+            type="text"
+            name="username"
+            required
+            autocomplete="username"
+            data-error="login-username-error"
+            placeholder="Например: moderator"
+          />
+          <span id="login-username-error" class="field-error" hidden></span>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="login-password">Пароль</label>
+          <input
+            id="login-password"
+            class="form-control"
+            type="password"
+            name="password"
+            required
+            autocomplete="current-password"
+            data-error="login-password-error"
+          />
+          <span id="login-password-error" class="field-error" hidden></span>
+        </div>
+
+        <button class="button button--primary" type="submit">Войти в панель модерации</button>
+      </form>
+    </section>
+  </div>
+{% endblock %}

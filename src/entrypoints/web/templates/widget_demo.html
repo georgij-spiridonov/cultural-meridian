@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block title %}Встраиваемый виджет афиши — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="hero-banner" aria-labelledby="widget-hero-title">
+    <p class="hero-banner__eyebrow">Интеграция для сайтов музеев, ДК и городских порталов</p>
+    <h1 id="widget-hero-title" class="hero-banner__title">
+      Конструктор встраиваемого виджета
+    </h1>
+    <p class="hero-banner__lead">
+      Настройте город, категорию, период и высоту блока. Виджет подключается одной строкой скрипта
+      <code>/widget.js</code>, изолирован через Shadow DOM и <code>iframe</code> и не передаёт сторонние cookies.
+    </p>
+  </section>
+
+  <div class="split-grid">
+    <section class="panel-card" aria-labelledby="widget-config-heading">
+      <h2 id="widget-config-heading" class="panel-card__heading">Параметры встраивания</h2>
+
+      <form id="widget-config-form" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="form-field">
+          <label class="form-label" for="widget-city">Город</label>
+          <select id="widget-city" class="form-control" name="city">
+            <option value="">Все города</option>
+            {% for city_ref in cities %}
+              <option value="{{ city_ref.name }}" {% if selected_city == city_ref.name %}selected{% endif %}>
+                {{ city_ref.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="widget-category">Категория</label>
+          <select id="widget-category" class="form-control" name="category">
+            <option value="">Все категории</option>
+            {% for cat_enum, cat_label in category_labels.items() %}
+              <option value="{{ cat_enum.value }}" {% if selected_category == cat_enum.value %}selected{% endif %}>
+                {{ cat_label }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="widget-period">Период</label>
+          <select id="widget-period" class="form-control" name="period">
+            <option value="">Все предстоящие</option>
+            {% for period_val, period_label in period_labels.items() %}
+              <option value="{{ period_val }}" {% if selected_period == period_val %}selected{% endif %}>
+                {{ period_label }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+          <div class="form-field">
+            <label class="form-label" for="widget-limit">Событий в блоке</label>
+            <input
+              id="widget-limit"
+              class="form-control"
+              type="number"
+              name="limit"
+              min="1"
+              max="12"
+              value="{{ selected_limit }}"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="widget-height">Высота, px</label>
+            <input
+              id="widget-height"
+              class="form-control"
+              type="number"
+              name="height"
+              min="280"
+              max="1200"
+              step="20"
+              value="{{ selected_height }}"
+            />
+          </div>
+        </div>
+
+        <button class="button button--primary" type="submit">Обновить предпросмотр и код</button>
+      </form>
+
+      <div style="margin-top: 20px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px;">
+          <h3 style="margin: 0; font-size: 1rem;">HTML-код для вставки на ваш сайт</h3>
+          <button
+            class="button button--small"
+            type="button"
+            data-copy-action="snippet"
+            data-copy-source="widget-embed-snippet"
+          >
+            Копировать код
+          </button>
+        </div>
+        {% set initial_attrs = [
+          'data-cultural-meridian-widget="true"',
+          'data-city="' ~ selected_city ~ '"' if selected_city else '',
+          'data-category="' ~ selected_category ~ '"' if selected_category else '',
+          'data-period="' ~ selected_period ~ '"' if selected_period else '',
+          'data-limit="' ~ selected_limit ~ '"',
+          'data-height="' ~ selected_height ~ '"'
+        ] | reject('equalto', '') | join('\n  ') %}
+        <pre id="widget-embed-snippet" class="code-block">&lt;div
+  {{ initial_attrs }}
+&gt;&lt;/div&gt;
+&lt;script src="{{ base_url }}/widget.js" defer&gt;&lt;/script&gt;</pre>
+      </div>
+    </section>
+
+    <section
+      class="panel-card host-sandbox"
+      aria-labelledby="widget-preview-heading"
+      style="font-family: Georgia, serif; border-style: dashed;"
+    >
+      <h2 id="widget-preview-heading" class="panel-card__heading" style="font-family: inherit;">
+        Живой предпросмотр в песочнице стороннего сайта
+      </h2>
+      <p style="margin: 0 0 12px; font-size: 0.9rem; color: var(--ink-secondary);">
+        Этот блок намеренно стилизован шрифтом <code>Georgia</code>, чтобы показать, что стили родительской
+        страницы не просачиваются внутрь виджета.
+      </p>
+
+      <div
+        id="widget-demo-mount"
+        data-cultural-meridian-widget="true"
+        data-base-url="{{ base_url }}"
+        data-city="{{ selected_city }}"
+        data-category="{{ selected_category }}"
+        data-period="{{ selected_period }}"
+        data-limit="{{ selected_limit }}"
+        data-height="{{ selected_height }}"
+      ></div>
+    </section>
+  </div>
+
+  <script src="/widget.js" defer></script>
+{% endblock %}

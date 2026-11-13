@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Афиша «Культурный Меридиан»</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <style>
+      body {
+        min-height: auto;
+        background-color: #f5f4ee;
+        padding: 12px;
+      }
+      .widget-container {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .widget-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        background: #ffffff;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-md);
+        padding: 12px 14px;
+      }
+      .widget-header__title {
+        margin: 0;
+        font-size: 1.05rem;
+        line-height: 1.25;
+      }
+      .widget-header__meta {
+        margin: 2px 0 0;
+        font-size: 0.82rem;
+        color: var(--ink-secondary);
+      }
+      .widget-list {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+      .widget-card {
+        background: #ffffff;
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius-sm);
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .widget-card__top {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+      .widget-card__title {
+        margin: 0;
+        font-size: 0.98rem;
+        line-height: 1.3;
+      }
+      .widget-card__meta {
+        margin: 0;
+        font-size: 0.84rem;
+        color: var(--ink-secondary);
+      }
+      .widget-footer {
+        background: var(--surface-disclaimer);
+        color: var(--ink-on-dark);
+        border-radius: var(--radius-sm);
+        padding: 8px 12px;
+        font-size: 0.78rem;
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="widget-container">
+      <header class="widget-header">
+        <div>
+          <h1 class="widget-header__title">
+            Афиша Республики Башкортостан
+          </h1>
+          <p class="widget-header__meta">
+            {% if city %}Город: {{ city }}{% else %}Все города{% endif %}
+            {% if category %} · {{ category_labels.get(events[0].category, category) if events else category }}{% endif %}
+            {% if period %} · {{ period_labels.get(period, period) }}{% endif %}
+            · Найдено: {{ total_count }}
+          </p>
+        </div>
+
+        <a
+          class="button button--small button--primary"
+          href="{{ full_catalog_url }}"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Вся афиша ↗
+        </a>
+      </header>
+
+      {% if error_message %}
+        <div class="alert alert--danger" role="alert">
+          {{ error_message }}
+        </div>
+      {% endif %}
+
+      {% if events %}
+        <div class="widget-list">
+          {% for event in events %}
+            <article class="widget-card">
+              <div class="widget-card__top">
+                <div style="display: flex; flex-wrap: wrap; gap: 5px;">
+                  <span class="badge badge--category">{{ category_labels[event.category] }}</span>
+                  {% if event.is_free %}
+                    <span class="badge badge--free">Бесплатно</span>
+                  {% else %}
+                    <span class="badge badge--neutral">{{ format_price(event) }}</span>
+                  {% endif %}
+                  <span class="badge badge--neutral">{{ event.age_limit }}+</span>
+                </div>
+                <span style="font-size: 0.8rem; font-weight: 600; color: var(--ink-secondary);">
+                  {{ format_date_range(event) }}
+                </span>
+              </div>
+
+              <h2 class="widget-card__title">
+                <a
+                  href="{{ base_url }}/events/{{ event.identifier }}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ event.title }}
+                </a>
+              </h2>
+
+              <p class="widget-card__meta">
+                {{ event.city }}, {{ event.venue }} ({{ event.address }})
+              </p>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <section class="panel-card" style="padding: 14px;">
+          <h2 style="margin: 0 0 6px; font-size: 1rem;">Подходящих событий пока нет</h2>
+          <p style="margin: 0 0 10px; font-size: 0.88rem; color: var(--ink-secondary);">
+            {% if empty_explanation %}{{ empty_explanation.summary }}{% else %}Измените параметры виджета или откройте общий каталог.{% endif %}
+          </p>
+          <a
+            class="button button--small button--primary"
+            href="{{ full_catalog_url }}"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Открыть общий каталог ↗
+          </a>
+        </section>
+      {% endif %}
+
+      <footer class="widget-footer">
+        {{ disclaimer_text }} · Виджет «Культурный Меридиан» работает без передачи cookies.
+      </footer>
+    </main>
+  </body>
+</html>

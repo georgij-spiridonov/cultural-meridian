@@ -1,0 +1,7 @@
+{% if feedback_notice %}
+  <div class="alert alert--success" role="status">{{ feedback_notice }}</div>
+{% endif %}
+
+{% if feedback_error %}
+  <div class="alert alert--danger" role="alert">{{ feedback_error }}</div>
+{% endif %}

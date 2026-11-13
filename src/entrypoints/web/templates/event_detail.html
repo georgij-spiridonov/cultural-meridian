@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+
+{% block title %}{{ event.title }} — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <p style="margin: 0 0 14px;">
+    <a class="button button--small" href="/">← Вернуться к каталогу афиши</a>
+  </p>
+
+  {% if event.status.value == "canceled" %}
+    <div class="alert alert--danger" role="alert">
+      <strong>Мероприятие отменено.</strong> Перед планированием посещения обязательно проверьте актуальное объявление на сайте организатора.
+    </div>
+  {% elif event.status.value == "draft" %}
+    <div class="alert alert--warning" role="status">
+      <strong>Карточка на проверке модератора.</strong> Сведения уточняются и пока не опубликованы в общем поиске.
+    </div>
+  {% endif %}
+
+  {% if feedback_submitted %}
+    <div class="alert alert--success" role="status">
+      Спасибо! Ваше сообщение по уточнению карточки передано редакции афиши.
+    </div>
+  {% endif %}
+
+  <div class="detail-layout">
+    <div>
+      <article class="panel-card">
+        <div class="event-card__badges">
+          <span class="badge badge--category">{{ category_labels[event.category] }}</span>
+          {% if event.status.value == "canceled" %}
+            <span class="badge badge--danger">Отменено</span>
+          {% endif %}
+          {% if event.is_free %}
+            <span class="badge badge--free">Бесплатно</span>
+          {% endif %}
+          <span class="badge badge--neutral">{{ event.age_limit }}+</span>
+          {% if event.language %}
+            <span class="badge badge--neutral">Язык: {{ event.language }}</span>
+          {% endif %}
+        </div>
+
+        <h1 style="margin: 0 0 14px; font-size: clamp(1.35rem, 2.8vw, 1.95rem); line-height: 1.2;">
+          {{ event.title }}
+        </h1>
+
+        <dl class="fact-list">
+          <div class="fact-list__item">
+            <dt>Дата и время</dt>
+            <dd>{{ format_date_range(event) }}</dd>
+          </div>
+
+          <div class="fact-list__item">
+            <dt>Город и площадка</dt>
+            <dd>{{ event.city }}, {{ event.venue }}</dd>
+          </div>
+
+          <div class="fact-list__item">
+            <dt>Адрес</dt>
+            <dd>{{ event.address }}</dd>
+          </div>
+
+          <div class="fact-list__item">
+            <dt>Условия входа и цена</dt>
+            <dd>{{ format_price(event) }}</dd>
+          </div>
+
+          {% if event.duration_minutes %}
+            <div class="fact-list__item">
+              <dt>Продолжительность</dt>
+              <dd>{{ event.duration_minutes }} мин.</dd>
+            </div>
+          {% endif %}
+
+          {% if event.organization_link %}
+            <div class="fact-list__item">
+              <dt>Сайт или страница организатора</dt>
+              <dd>
+                <a href="{{ event.organization_link }}" target="_blank" rel="noopener noreferrer">
+                  Перейти на сайт организатора ↗
+                </a>
+              </dd>
+            </div>
+          {% endif %}
+        </dl>
+
+        {% if event.description %}
+          <div style="margin-top: 18px;">
+            <h2 class="panel-card__heading">Описание события</h2>
+            <p style="margin: 0; white-space: pre-line; color: var(--ink-secondary);">{{ event.description }}</p>
+          </div>
+        {% endif %}
+
+        {% if event.tags %}
+          <div style="margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px;" aria-label="Теги события">
+            {% for tag in event.tags %}
+              <span class="badge badge--neutral">#{{ tag }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </article>
+
+      <section class="panel-card" aria-labelledby="sources-heading">
+        <h2 id="sources-heading" class="panel-card__heading">
+          Проверенные источники карточки ({{ event.sources | length }})
+        </h2>
+        <p style="margin: 0 0 12px; font-size: 0.9rem; color: var(--ink-secondary);">
+          При совпадении анонсов на разных площадках сервис объединяет ссылки на все подтверждённые источники.
+        </p>
+
+        <ul class="source-list">
+          {% for source in event.sources %}
+            <li class="source-list__item">
+              <div>
+                <strong>{{ source.source_name or source.source_url }}</strong>
+                <div style="font-size: 0.84rem; color: var(--ink-secondary);">
+                  Тип: {{ source_type_labels.get(source.source_type, source.source_type.value) }}
+                  {% if source.verified_at %}
+                    · Проверено: {{ source.verified_at.strftime('%d.%m.%Y %H:%M') }}
+                  {% endif %}
+                </div>
+              </div>
+              <a
+                class="button button--small"
+                href="{{ source.source_url }}"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Открыть источник ↗
+              </a>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    </div>
+
+    <aside>
+      <section class="panel-card" aria-labelledby="share-heading">
+        <h2 id="share-heading" class="panel-card__heading">Поделиться событием</h2>
+        <p style="margin: 0 0 12px; font-size: 0.9rem; color: var(--ink-secondary);">
+          У каждой карточки постоянный адрес. Ссылку удобно отправить в мессенджер или сохранить в закладки.
+        </p>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <button class="button button--primary" type="button" data-copy-action="url">
+            Скопировать ссылку на карточку
+          </button>
+          <a class="button" href="/?city={{ event.city | urlencode }}">
+            Афиша города {{ event.city }}
+          </a>
+        </div>
+      </section>
+
+      <section class="panel-card" aria-labelledby="feedback-heading">
+        <h2 id="feedback-heading" class="panel-card__heading">Уточнить сведения или сообщить об отмене</h2>
+        <p style="margin: 0 0 12px; font-size: 0.9rem; color: var(--ink-secondary);">
+          Если время, площадка или стоимость изменились, напишите редакции — модератор проверит источник и обновит карточку.
+        </p>
+
+        <div id="feedback-result"></div>
+
+        <form
+          action="/feedback"
+          method="post"
+          hx-post="/feedback"
+          hx-target="#feedback-result"
+          hx-swap="innerHTML"
+          style="display: flex; flex-direction: column; gap: 12px;"
+        >
+          <input type="hidden" name="event_identifier" value="{{ event.identifier }}" />
+
+          <div class="honeypot-field" aria-hidden="true">
+            <label for="event-honeypot">Оставьте поле пустым</label>
+            <input id="event-honeypot" type="text" name="honeypot_website" tabindex="-1" autocomplete="off" />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="event-feedback-text">Что нужно уточнить</label>
+            <textarea
+              id="event-feedback-text"
+              class="form-control"
+              name="message_text"
+              rows="4"
+              minlength="8"
+              maxlength="1200"
+              required
+              data-error="event-feedback-error"
+              placeholder="Укажите правильное время начала, цену или приложите ссылку на официальное сообщение организатора"
+            ></textarea>
+            <span id="event-feedback-error" class="field-error" hidden></span>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="event-contact-hint">Ссылка или псевдоним для связи (необязательно)</label>
+            <input
+              id="event-contact-hint"
+              class="form-control"
+              type="text"
+              name="contact_hint"
+              maxlength="160"
+              placeholder="Например: @organizer_ufa или ссылка на сайт"
+            />
+          </div>
+
+          <button class="button button--primary" type="submit">Отправить уточнение</button>
+        </form>
+      </section>
+    </aside>
+  </div>
+
+  {% if similar_events %}
+    <section style="margin-top: 28px;" aria-labelledby="similar-heading">
+      <h2 id="similar-heading" style="margin: 0 0 14px; font-size: 1.25rem;">
+        Похожие мероприятия
+      </h2>
+      <div class="events-grid">
+        {% for similar in similar_events %}
+          <article class="event-card">
+            <div>
+              <div class="event-card__badges">
+                <span class="badge badge--category">{{ category_labels[similar.category] }}</span>
+                {% if similar.is_free %}
+                  <span class="badge badge--free">Бесплатно</span>
+                {% endif %}
+                <span class="badge badge--neutral">{{ similar.age_limit }}+</span>
+              </div>
+              <h3 class="event-card__title">
+                <a href="/events/{{ similar.identifier }}">{{ similar.title }}</a>
+              </h3>
+              <ul class="event-card__meta">
+                <li><strong>Когда:</strong> {{ format_date_range(similar) }}</li>
+                <li><strong>Где:</strong> {{ similar.city }}, {{ similar.venue }}</li>
+              </ul>
+            </div>
+            <div class="event-card__footer">
+              <span class="event-card__price">{{ format_price(similar) }}</span>
+              <a class="button button--small" href="/events/{{ similar.identifier }}">Подробнее</a>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

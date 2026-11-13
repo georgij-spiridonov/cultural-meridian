@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}Мероприятие не найдено — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="empty-state" aria-labelledby="not-found-heading">
+    <h1 id="not-found-heading" class="empty-state__title">Карточка мероприятия недоступна</h1>
+    <p class="empty-state__summary">{{ missing_message }}</p>
+    <div class="relaxation-actions">
+      <a class="button button--primary" href="/">Перейти к актуальному каталогу</a>
+      <a class="button" href="/subscriptions">Сообщить о новом событии</a>
+    </div>
+  </section>
+{% endblock %}

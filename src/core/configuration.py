@@ -15,9 +15,11 @@ __all__ = [
     "ApplicationSettings",
     "DatabaseSettings",
     "LoggingSettings",
+    "WebSettings",
     "get_application_settings",
     "get_database_settings",
     "get_logging_settings",
+    "get_web_settings",
 ]
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
@@ -134,6 +136,53 @@ class DatabaseSettings(BaseSettings):
         encoded_password = quote_plus(self.PASSWORD)
         encoded_database_name = quote_plus(self.NAME)
         return f"postgresql+asyncpg://{encoded_user}:{encoded_password}@{self.HOST}:{self.PORT}/{encoded_database_name}"
+
+
+class WebSettings(BaseSettings):
+    """Настройки веб-сервера, REST API, ограничений частоты запросов и админ-сессий.
+
+    Attributes:
+        HOST: Сетевой адрес прослушивания HTTP-сервера.
+        PORT: TCP-порт веб-сервера.
+        PUBLIC_BASE_URL: Публичный базовый URL сервиса для генерации ссылок встраиваемого виджета.
+        ADMIN_USERNAME: Логин встроенного модератора веб-панели.
+        ADMIN_PASSWORD: Пароль встроенного модератора для демонстрационного и локального запуска.
+        SESSION_SECRET: Секрет для HMAC-подписи сессионных cookie администратора.
+        SESSION_TTL_SECONDS: Время жизни сессии модератора в секундах.
+        RATE_LIMIT_REQUESTS_PER_MINUTE: Общий лимит запросов в минуту с одного IP-адреса.
+        FEEDBACK_RATE_LIMIT_PER_MINUTE: Лимит отправок формы обратной связи с одного IP в минуту.
+        ALLOWED_ORIGINS: Список разрешённых источников для CORS открытого JSON API.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="WEB_",
+        extra="ignore",
+        env_ignore_empty=True,
+        frozen=True,
+    )
+
+    HOST: str = Field(default="0.0.0.0", min_length=1)
+    PORT: int = Field(default=8000, ge=1, le=65535)
+    PUBLIC_BASE_URL: str = Field(default="http://localhost:8000", min_length=1)
+    ADMIN_USERNAME: str = Field(default="moderator", min_length=1)
+    ADMIN_PASSWORD: str = Field(default="meridian_admin_dev", min_length=4)
+    SESSION_SECRET: str = Field(default="cultural-meridian-dev-session-secret-change-me", min_length=16)
+    SESSION_TTL_SECONDS: int = Field(default=43200, ge=300)
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = Field(default=120, ge=10)
+    FEEDBACK_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1)
+    ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["*"])
+
+
+@lru_cache
+def get_web_settings() -> WebSettings:
+    """Возвращает кэшированный экземпляр настроек веб-сервиса.
+
+    Returns:
+        Неизменяемые настройки веб-сервера и API.
+    """
+    return WebSettings()
 
 
 @lru_cache

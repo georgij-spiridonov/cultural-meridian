@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+
+{% block title %}Каталог мероприятий Башкортостана — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="hero-banner" aria-labelledby="hero-title">
+    <p class="hero-banner__eyebrow">Культурная афиша региона</p>
+    <h1 id="hero-title" class="hero-banner__title">
+      События Республики Башкортостан в едином окне
+    </h1>
+    <p class="hero-banner__lead">
+      Проверенные концерты, спектакли, выставки, фестивали и городские лекции в Уфе,
+      Стерлитамаке, Салавате, Нефтекамске и других городах республики. Фильтры синхронизируются
+      с адресом страницы — подборку можно сразу отправить друзьям.
+    </p>
+  </section>
+
+  <section class="filter-panel" aria-label="Фильтры поиска мероприятий">
+    <form
+      action="/"
+      method="get"
+      hx-get="/partials/events"
+      hx-target="#catalog-results"
+      hx-trigger="change from:select, change from:input[type=checkbox], change from:input[type=radio], change from:input[type=date], submit"
+      hx-indicator="#catalog-loading"
+    >
+      <div class="filter-grid">
+        <div class="form-field">
+          <label class="form-label" for="filter-query">Поиск по названию, описанию или тегам</label>
+          <input
+            id="filter-query"
+            class="form-control"
+            type="search"
+            name="query"
+            value="{{ parameters.query or '' }}"
+            placeholder="Например: джаз, Щелкунчик, мастер-класс"
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="filter-city">Город</label>
+          <select id="filter-city" class="form-control" name="city">
+            <option value="">Все города Башкортостана</option>
+            {% for city_ref in cities %}
+              <option value="{{ city_ref.name }}" {% if parameters.city == city_ref.name %}selected{% endif %}>
+                {{ city_ref.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="filter-category">Категория</label>
+          <select id="filter-category" class="form-control" name="category">
+            <option value="">Все категории</option>
+            {% for value, label in category_options %}
+              <option value="{{ value }}" {% if parameters.category == value %}selected{% endif %}>
+                {{ label }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="filter-age">Возрастной порог</label>
+          <select id="filter-age" class="form-control" name="maximum_age_limit">
+            <option value="">Любой возраст</option>
+            {% for age in age_options %}
+              <option value="{{ age }}" {% if parameters.maximum_age_limit == age %}selected{% endif %}>
+                До {{ age }}+
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div>
+          <button class="button button--primary" type="submit">Найти события</button>
+        </div>
+      </div>
+
+      <div class="period-strip" role="radiogroup" aria-label="Быстрый выбор периода">
+        <span class="form-label">Период:</span>
+        <label class="period-pill">
+          <input
+            type="radio"
+            name="period"
+            value=""
+            {% if not parameters.period %}checked{% endif %}
+          />
+          <span>Все даты</span>
+        </label>
+        {% for period_value, period_label in period_options %}
+          <label class="period-pill">
+            <input
+              type="radio"
+              name="period"
+              value="{{ period_value }}"
+              {% if parameters.period == period_value %}checked{% endif %}
+            />
+            <span>{{ period_label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+
+      {% set has_advanced = (
+        parameters.date_from
+        or parameters.date_to
+        or parameters.maximum_price is not none
+        or parameters.only_free
+        or parameters.language
+        or parameters.venue
+        or parameters.near_center
+        or parameters.sort_field != 'date_start'
+        or parameters.sort_direction != 'ascending'
+      ) %}
+      <details class="advanced-filters" {% if has_advanced %}open{% endif %}>
+        <summary class="advanced-filters__summary">
+          Точные даты, бюджет, площадка, язык и сортировка
+        </summary>
+
+        <div class="advanced-filters__grid">
+          <div class="form-field">
+            <label class="form-label" for="filter-date-from">Дата с</label>
+            <input
+              id="filter-date-from"
+              class="form-control"
+              type="date"
+              name="date_from"
+              value="{{ parameters.date_from or '' }}"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-date-to">Дата по</label>
+            <input
+              id="filter-date-to"
+              class="form-control"
+              type="date"
+              name="date_to"
+              value="{{ parameters.date_to or '' }}"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-max-price">Цена до, ₽</label>
+            <input
+              id="filter-max-price"
+              class="form-control"
+              type="number"
+              min="0"
+              step="50"
+              name="maximum_price"
+              value="{{ parameters.maximum_price if parameters.maximum_price is not none else '' }}"
+              placeholder="Например: 1000"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-venue">Площадка</label>
+            <input
+              id="filter-venue"
+              class="form-control"
+              type="text"
+              name="venue"
+              value="{{ parameters.venue or '' }}"
+              placeholder="Например: Конгресс-холл"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-language">Язык проведения</label>
+            <input
+              id="filter-language"
+              class="form-control"
+              type="text"
+              name="language"
+              value="{{ parameters.language or '' }}"
+              placeholder="русский, башкирский"
+            />
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-sort-field">Сортировать по</label>
+            <select id="filter-sort-field" class="form-control" name="sort_field">
+              <option value="date_start" {% if parameters.sort_field == 'date_start' %}selected{% endif %}>
+                Дате начала
+              </option>
+              <option value="price" {% if parameters.sort_field == 'price' %}selected{% endif %}>
+                Минимальной цене
+              </option>
+              <option value="created_at" {% if parameters.sort_field == 'created_at' %}selected{% endif %}>
+                Дате добавления
+              </option>
+            </select>
+          </div>
+
+          <div class="form-field">
+            <label class="form-label" for="filter-sort-direction">Порядок</label>
+            <select id="filter-sort-direction" class="form-control" name="sort_direction">
+              <option value="ascending" {% if parameters.sort_direction == 'ascending' %}selected{% endif %}>
+                По возрастанию
+              </option>
+              <option value="descending" {% if parameters.sort_direction == 'descending' %}selected{% endif %}>
+                По убыванию
+              </option>
+            </select>
+          </div>
+
+          <div class="form-field" style="justify-content: flex-end; gap: 6px;">
+            <label class="form-checkbox">
+              <input
+                type="checkbox"
+                name="only_free"
+                value="true"
+                {% if parameters.only_free %}checked{% endif %}
+              />
+              <span>Только бесплатные</span>
+            </label>
+            <label class="form-checkbox">
+              <input
+                type="checkbox"
+                name="near_center"
+                value="true"
+                {% if parameters.near_center %}checked{% endif %}
+              />
+              <span>Ближе к центру города</span>
+            </label>
+          </div>
+        </div>
+      </details>
+    </form>
+  </section>
+
+  <div id="catalog-results">
+    {% include "partials/events_results.html" %}
+  </div>
+{% endblock %}
