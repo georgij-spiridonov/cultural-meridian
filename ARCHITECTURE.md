@@ -132,9 +132,9 @@ cultural-meridian/
 │   │   ├── ports/                                 # Чётко разделённые компактные Protocol-порты (один файл — один порт)
 │   │   │   ├── __init__.py                        # Единый публичный фасад реэкспорта портов
 │   │   │   ├── administration_repository.py       # Порт модерации, аудита, подписок и заявок организаторов
-│   │   │   ├── agent_orchestrator.py              # Порт запуска ИИ-агента и сбора трассировки
+│   │   │   ├── agent_orchestrator.py              # Порт запуска ИИ-агента и контейнер обработчиков инструментов
 │   │   │   ├── dialog_repository.py               # Порт истории диалога (≥ 5 реплик), подтверждений и бюджета
-│   │   │   ├── event_repository.py                # Порт каталога, поиска, дедупликации и справочников
+│   │   │   ├── event_repository.py                # Порт каталога, поиска, справочников и ETag
 │   │   │   ├── geolocation_resolver.py            # Порт определения координат и расчёта времени перемещения
 │   │   │   ├── link_checker.py                    # Порт проверки доступности ссылки на источник
 │   │   │   ├── raw_event_repository.py            # Порт хранения сырых данных источников и переигрывания нормализации
@@ -238,7 +238,7 @@ cultural-meridian/
 | `raw_event_repository.py` (`RawEventRepositoryPort`) | Сохранение сырых записей источников и выборка для переигрывания нормализации | `database/raw_event_repository.py` | Идемпотентность по `(source_id, source_hash)` |
 | `dialog_repository.py` (`DialogRepositoryPort`) | Память диалога (≥ 5 реплик), отложенные подтверждения, трассы и суточный бюджет ₽ | `database/dialog_repository.py` | Атомарное списание расхода и удаление подтверждения после выполнения |
 | `administration_repository.py` (`AdministrationRepositoryPort`) | Очередь модерации, журнал изменений, подписки и заявки организаторов | `database/administration_repository.py` | Физическое удаление подписки при отписке |
-| `agent_orchestrator.py` (`AgentOrchestratorPort`) | Выполнение хода диалога ИИ-агента с инструментами и возврат трассы/токенов | `language_model/agent_orchestrator.py` | Таймаут/ошибка модели или лимит бюджета переводят запрос на `fallback_search.py` |
+| `agent_orchestrator.py` (`AgentOrchestratorPort`, `AgentToolCallbacks`) | Выполнение хода диалога ИИ-агента с прикладными колбэками инструментов и возврат трассы | `language_model/agent_orchestrator.py` | Таймаут/ошибка модели или лимит бюджета переводят запрос на `fallback_search.py` |
 | `structured_extractor.py` (`StructuredExtractorPort`) | Извлечение полей сложных событий со строгим `structured output` | `language_model/structured_extractor.py` | При недоступности модели конвейер продолжает работу на правилах и отправляет карточку в модерацию |
 | `source_fetcher.py` (`SourceFetcherPort`) | Загрузка и первичный разбор элементов из RSS, JSON API и HTML-страниц | `sources/{rss,json,html}_fetcher.py` | Ошибка одного источника логируется и не останавливает сбор по остальным |
 | `link_checker.py` (`LinkCheckerPort`) | Проверка доступности `source_url` (HTTP 2xx/3xx) с коротким таймаутом | `sources/link_checker.py` | Недоступная ссылка переводит событие в очередь модерации вместо публикации |
