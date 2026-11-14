@@ -15,12 +15,14 @@ __all__ = [
     "PROJECT_ROOT",
     "ApplicationSettings",
     "DatabaseSettings",
+    "GeolocationSettings",
     "LanguageModelSettings",
     "LoggingSettings",
     "TelegramSettings",
     "WebSettings",
     "get_application_settings",
     "get_database_settings",
+    "get_geolocation_settings",
     "get_language_model_settings",
     "get_logging_settings",
     "get_telegram_settings",
@@ -397,6 +399,92 @@ class LanguageModelSettings(BaseSettings):
             Словарь тарифов в рублях за один миллион токенов для каждой настроенной модели.
         """
         return _parse_pricing_payload(self.PRICING_JSON)
+
+
+class GeolocationSettings(BaseSettings):
+    """Настройки геолокации, локального справочника координат и оценки времени в пути.
+
+    Attributes:
+        VENUES_CATALOG_PATH: Путь к YAML-справочнику городов и площадок с координатами.
+        EXTERNAL_ENABLED: Признак разрешения сетевых запросов к внешним сервисам геокодирования и маршрутизации.
+        GEOCODER_BASE_URL: Базовый URL геокодера Nominatim.
+        ROUTER_BASE_URL: Базовый URL сервиса маршрутизации OSRM.
+        USER_AGENT: Заголовок `User-Agent` для вежливых HTTP-запросов к внешнему геокодеру.
+        REQUEST_TIMEOUT_SECONDS: Таймаут одного HTTP-запроса к внешнему геосервису в секундах.
+        CACHE_MAX_ENTRIES: Максимальное число записей в кэше координат и оценок маршрутов в памяти.
+        AVERAGE_URBAN_SPEED_KM_PER_HOUR: Средняя скорость городского транспорта для резервного расчёта по гаверсинусу.
+        TRANSFER_OVERHEAD_MINUTES: Дополнительное время на посадку, подход и пересадку в минутах.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="GEOLOCATION_",
+        extra="ignore",
+        env_ignore_empty=True,
+        frozen=True,
+    )
+
+    VENUES_CATALOG_PATH: Path = Field(default=PROJECT_ROOT / "configuration" / "venues_coordinates.yaml")
+    EXTERNAL_ENABLED: bool = False
+    GEOCODER_BASE_URL: str = "https://nominatim.openstreetmap.org"
+    ROUTER_BASE_URL: str = "https://router.project-osrm.org"
+    USER_AGENT: str = "cultural-meridian/1.0 (+https://cultural-meridian.local)"
+    REQUEST_TIMEOUT_SECONDS: float = Field(default=3.0, gt=0.0, le=30.0)
+    CACHE_MAX_ENTRIES: int = Field(default=1024, ge=64)
+    AVERAGE_URBAN_SPEED_KM_PER_HOUR: float = Field(default=25.0, gt=1.0)
+    TRANSFER_OVERHEAD_MINUTES: int = Field(default=7, ge=0)
+
+    @field_validator("VENUES_CATALOG_PATH", mode="after")
+    @classmethod
+    def resolve_venues_catalog_path(cls, catalog_path: Path) -> Path:
+        """Преобразует относительный путь к YAML-справочнику площадок в абсолютный от корня проекта.
+
+        Arguments:
+            catalog_path: Путь к файлу справочника координат из конфигурации.
+
+        Returns:
+            Абсолютный путь к файлу справочника.
+        """
+        if catalog_path.is_absolute():
+            return catalog_path
+        return PROJECT_ROOT / catalog_path
+
+    @field_validator("GEOCODER_BASE_URL", "ROUTER_BASE_URL", mode="after")
+    @classmethod
+    def strip_url_option(cls, value: str) -> str:
+        """Удаляет крайние пробелы и завершающий слеш у URL-параметров геосервисов.
+
+        Arguments:
+            value: Исходное строковое значение URL.
+
+        Returns:
+            Нормализованный URL без крайних пробелов и завершающего слеша.
+        """
+        return value.strip().rstrip("/")
+
+    @field_validator("USER_AGENT", mode="after")
+    @classmethod
+    def strip_user_agent(cls, value: str) -> str:
+        """Удаляет крайние пробелы у заголовка `User-Agent`.
+
+        Arguments:
+            value: Исходное значение заголовка `User-Agent`.
+
+        Returns:
+            Очищенная строка заголовка.
+        """
+        return value.strip()
+
+
+@lru_cache
+def get_geolocation_settings() -> GeolocationSettings:
+    """Возвращает кэшированный экземпляр настроек геолокации и оценки маршрутов.
+
+    Returns:
+        Неизменяемые настройки геолокации.
+    """
+    return GeolocationSettings()
 
 
 @lru_cache
