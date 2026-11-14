@@ -5,13 +5,15 @@ from datetime import date, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
+import pytest
+
 from src.application.agent_dialog import AgentDialogService
 from src.application.fallback_search import FallbackSearchService
 from src.application.search_events import EventSearchService
 from src.application.subscriptions import SubscriptionService
 from src.application.weekend_planner import WeekendPlannerService
 from src.core.configuration import LanguageModelSettings
-from src.core.exceptions import NetworkConnectionTimeoutError
+from src.core.exceptions import NetworkConnectionTimeoutError, ValidationException
 from src.core.types import DialogChannel, EventCategory, EventStatus, RealCollection, SourceType
 from src.domain.entities import (
     AgentToolInvocation,
@@ -660,3 +662,146 @@ async def test_dialog_service_two_step_confirmation_confirm_cancel_and_expired_t
     )
     assert "истёк" in expired_reply.answer_text.lower()
     assert len(admin_repo.subscriptions) == 1
+
+
+async def test_dialog_service_resolve_pending_action_confirm_cancel_expired_mismatch_and_trace() -> None:
+    """Проверяет публичный метод `resolve_pending_action`: confirm, cancel, TTL, чужая сессия и трасса."""
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=BASHKORTOSTAN_TIMEZONE)
+    settings = LanguageModelSettings(_env_file=None, API_KEY="test-key", PROMPT_VERSION="v1.0")
+    dialog_repo = _InMemoryDialogRepositoryStub()
+    admin_repo = _InMemoryAdministrationRepositoryStub()
+
+    # 1. Явное подтверждение подписки (confirm) + запись реплик и трассы
+    sub_service = _build_dialog_service(
+        events=[],
+        dialog_repo=dialog_repo,
+        admin_repo=admin_repo,
+        orchestrator=_OrchestratorStub(prepare_subscribe_city="Уфа"),
+        settings=settings,
+    )
+    step_sub = await sub_service.handle_message(
+        session_identifier="web:vis-1:sess-1",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-1",
+        user_message="Подпиши на концерты в Уфе",
+        request_identifier="req-sub-init",
+        current_datetime=now,
+    )
+    assert step_sub.pending_action is not None
+
+    confirm_sub = await sub_service.resolve_pending_action(
+        action_identifier=step_sub.pending_action.action_identifier,
+        session_identifier="web:vis-1:sess-1",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-1",
+        decision="confirm",
+        request_identifier="req-sub-confirm",
+        current_datetime=now + timedelta(seconds=15),
+    )
+    assert "Подписка оформлена" in confirm_sub.answer_text
+    assert confirm_sub.trace_identifier is not None
+    assert len(admin_repo.subscriptions) == 1
+    assert admin_repo.subscriptions[0].channel == DialogChannel.WEB
+    assert admin_repo.subscriptions[0].subscriber_identifier == "vis-1"
+    assert dialog_repo.messages_by_session["web:vis-1:sess-1"][-2].content == "Подтвердить действие"
+    assert "Подписка оформлена" in dialog_repo.messages_by_session["web:vis-1:sess-1"][-1].content
+    sub_trace = await dialog_repo.get_trace(trace_identifier=confirm_sub.trace_identifier)
+    assert sub_trace is not None
+    assert sub_trace.request_identifier == "req-sub-confirm"
+    assert sub_trace.session_identifier == "web:vis-1:sess-1"
+    assert sub_trace.channel == DialogChannel.WEB
+
+    # 2. Несоответствие сессии: чужая сессия не может подтвердить или отменить действие
+    fb_service = _build_dialog_service(
+        events=[],
+        dialog_repo=dialog_repo,
+        admin_repo=admin_repo,
+        orchestrator=_OrchestratorStub(prepare_feedback_text="Добавьте больше детских спектаклей"),
+        settings=settings,
+    )
+    step_fb = await fb_service.handle_message(
+        session_identifier="web:vis-2:sess-2",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-2",
+        user_message="Передай пожелание организаторам",
+        current_datetime=now,
+    )
+    assert step_fb.pending_action is not None
+
+    mismatch_result = await fb_service.resolve_pending_action(
+        action_identifier=step_fb.pending_action.action_identifier,
+        session_identifier="web:attacker:sess-x",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="attacker",
+        decision="confirm",
+        request_identifier="req-mismatch",
+        current_datetime=now + timedelta(seconds=5),
+    )
+    assert "не найден" in mismatch_result.answer_text.lower()
+    assert mismatch_result.trace_identifier is not None
+    assert len(admin_repo.feedback_requests) == 0
+    assert "web:attacker:sess-x" not in dialog_repo.messages_by_session
+    assert "web:vis-2:sess-2" in dialog_repo.pending_by_session
+    mismatch_trace = await dialog_repo.get_trace(trace_identifier=mismatch_result.trace_identifier)
+    assert mismatch_trace is not None
+    assert mismatch_trace.request_identifier == "req-mismatch"
+
+    # 3. Явная отмена обращения (cancel) владельцем сессии
+    cancel_fb = await fb_service.resolve_pending_action(
+        action_identifier=step_fb.pending_action.action_identifier,
+        session_identifier="web:vis-2:sess-2",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-2",
+        decision="cancel",
+        request_identifier="req-fb-cancel",
+        current_datetime=now + timedelta(seconds=20),
+    )
+    assert "отменено" in cancel_fb.answer_text.lower()
+    assert cancel_fb.trace_identifier is not None
+    assert len(admin_repo.feedback_requests) == 0
+    assert "web:vis-2:sess-2" not in dialog_repo.pending_by_session
+    assert dialog_repo.messages_by_session["web:vis-2:sess-2"][-2].content == "Отменить действие"
+
+    # 4. Истёкший TTL при явном confirm
+    ttl_service = _build_dialog_service(
+        events=[],
+        dialog_repo=dialog_repo,
+        admin_repo=admin_repo,
+        orchestrator=_OrchestratorStub(prepare_feedback_text="Добавить раздел про фестивали"),
+        settings=settings,
+        pending_action_ttl_seconds=60,
+    )
+    step_ttl = await ttl_service.handle_message(
+        session_identifier="web:vis-3:sess-3",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-3",
+        user_message="Отправь обращение",
+        current_datetime=now,
+    )
+    assert step_ttl.pending_action is not None
+
+    expired_result = await ttl_service.resolve_pending_action(
+        action_identifier=step_ttl.pending_action.action_identifier,
+        session_identifier="web:vis-3:sess-3",
+        channel=DialogChannel.WEB,
+        subscriber_identifier="vis-3",
+        decision="confirm",
+        request_identifier="req-ttl-expired",
+        current_datetime=now + timedelta(seconds=120),
+    )
+    assert "истёк" in expired_result.answer_text.lower()
+    assert expired_result.trace_identifier is not None
+    assert len(admin_repo.feedback_requests) == 0
+    expired_trace = await dialog_repo.get_trace(trace_identifier=expired_result.trace_identifier)
+    assert expired_trace is not None
+    assert expired_trace.request_identifier == "req-ttl-expired"
+
+    # 5. Валидация пустых идентификаторов
+    with pytest.raises(ValidationException):
+        await ttl_service.resolve_pending_action(
+            action_identifier=uuid4(),
+            session_identifier="   ",
+            channel=DialogChannel.WEB,
+            subscriber_identifier="vis-3",
+            decision="confirm",
+        )
