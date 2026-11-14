@@ -13,7 +13,9 @@ from src.domain.ports import (
     DialogRepositoryPort,
     EventRepositoryPort,
     GeolocationResolverPort,
+    LinkCheckerPort,
     RawEventRepositoryPort,
+    SourceFetcherPort,
     StructuredExtractorPort,
 )
 from src.infrastructure.database import (
@@ -25,6 +27,13 @@ from src.infrastructure.database import (
 )
 from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor
+from src.infrastructure.sources import (
+    CompositeSourceFetcher,
+    HtmlSourceFetcher,
+    HttpLinkChecker,
+    JsonSourceFetcher,
+    RssSourceFetcher,
+)
 
 
 def _build_geolocation_resolver() -> HybridGeolocationResolver:
@@ -61,6 +70,26 @@ def _build_structured_extractor() -> OpenAiStructuredExtractor:
     return OpenAiStructuredExtractor(settings=settings)
 
 
+def _build_rss_source_fetcher() -> RssSourceFetcher:
+    return RssSourceFetcher()
+
+
+def _build_json_source_fetcher() -> JsonSourceFetcher:
+    return JsonSourceFetcher()
+
+
+def _build_html_source_fetcher() -> HtmlSourceFetcher:
+    return HtmlSourceFetcher()
+
+
+def _build_composite_source_fetcher() -> CompositeSourceFetcher:
+    return CompositeSourceFetcher()
+
+
+def _build_http_link_checker() -> HttpLinkChecker:
+    return HttpLinkChecker()
+
+
 _PORT_IMPLEMENTATION_CASES: tuple[tuple[type[Any], type[Any], Callable[[], Any]], ...] = (
     (GeolocationResolverPort, HybridGeolocationResolver, _build_geolocation_resolver),
     (EventRepositoryPort, PostgreSqlEventRepository, _build_event_repository),
@@ -69,6 +98,11 @@ _PORT_IMPLEMENTATION_CASES: tuple[tuple[type[Any], type[Any], Callable[[], Any]]
     (StructuredExtractorPort, OpenAiStructuredExtractor, _build_structured_extractor),
     (AdministrationRepositoryPort, PostgreSqlAdministrationRepository, _build_administration_repository),
     (RawEventRepositoryPort, PostgreSqlRawEventRepository, _build_raw_event_repository),
+    (SourceFetcherPort, RssSourceFetcher, _build_rss_source_fetcher),
+    (SourceFetcherPort, JsonSourceFetcher, _build_json_source_fetcher),
+    (SourceFetcherPort, HtmlSourceFetcher, _build_html_source_fetcher),
+    (SourceFetcherPort, CompositeSourceFetcher, _build_composite_source_fetcher),
+    (LinkCheckerPort, HttpLinkChecker, _build_http_link_checker),
 )
 
 
