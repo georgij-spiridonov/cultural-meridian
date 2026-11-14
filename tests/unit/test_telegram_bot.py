@@ -150,6 +150,18 @@ class _EventRepositoryStub:
         """Возвращает справочник городов."""
         return self.cities
 
+    async def list_languages(self) -> tuple[str, ...]:
+        """Возвращает отсортированный список языков опубликованных мероприятий."""
+        return tuple(
+            sorted(
+                {
+                    event.language
+                    for event in self.events.values()
+                    if event.status == EventStatus.PUBLISHED and event.language
+                }
+            )
+        )
+
     async def list_venues(self, *, city: str | None = None) -> tuple[VenueReference, ...]:
         """Возвращает пустой список площадок для стаба."""
         del city

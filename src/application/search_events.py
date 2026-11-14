@@ -181,6 +181,10 @@ class EventSearchService:
         """Возвращает нормализованный справочник городов каталога."""
         return await self._event_repository.list_cities()
 
+    async def list_languages(self) -> tuple[str, ...]:
+        """Возвращает отсортированный список языков опубликованных мероприятий."""
+        return await self._event_repository.list_languages()
+
     async def list_venues(self, *, city: str | None = None) -> tuple[VenueReference, ...]:
         """Возвращает справочник площадок с необязательной фильтрацией по городу.
 

@@ -3,20 +3,12 @@
 {% block title %}Панель администратора и модератора — Культурный Меридиан{% endblock %}
 
 {% block content %}
-  <section class="hero-banner" aria-labelledby="admin-hero-title">
-    <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;">
-      <div>
-        <p class="hero-banner__eyebrow">Модератор: {{ moderator_username }}</p>
-        <h1 id="admin-hero-title" class="hero-banner__title" style="margin-bottom: 4px;">
-          Управление каталогом, импортом и модерацией
-        </h1>
-      </div>
-
-      <form action="/admin/logout" method="post">
-        <button class="button button--small" type="submit">Выйти из сессии</button>
-      </form>
-    </div>
-  </section>
+  <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px;">
+    <p class="hero-banner__eyebrow" style="margin: 0;">Модератор: {{ moderator_username }}</p>
+    <form action="/admin/logout" method="post">
+      <button class="button button--small" type="submit">Выйти из сессии</button>
+    </form>
+  </div>
 
   {% if notice_message %}
     <div class="alert alert--success" role="status">{{ notice_message }}</div>
