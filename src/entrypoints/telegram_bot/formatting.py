@@ -1,10 +1,20 @@
 """Форматирование сообщений Telegram-бота в безопасном HTML-представлении."""
 
+from datetime import date, datetime
 from html import escape
 from typing import Final
 
 from src.core.types import EventCategory, EventStatus
-from src.domain.entities import EmptySearchExplanation, Event, EventSearchFilter, EventSearchPage, SubscriptionRecord
+from src.domain.entities import (
+    EmptySearchExplanation,
+    Event,
+    EventSearchFilter,
+    EventSearchPage,
+    SubscriptionRecord,
+    WeekendPlanRequest,
+    WeekendPlanResult,
+    WeekendPlanStep,
+)
 from src.domain.services import BASHKORTOSTAN_TIMEZONE, normalize_optional_text
 from src.entrypoints.web._formatting import (
     CATEGORY_LABELS,
@@ -29,6 +39,10 @@ __all__ = [
     "format_subscription_label",
     "format_subscriptions_message",
     "format_telegram_datetime",
+    "format_weekend_plan_error_message",
+    "format_weekend_plan_result_message",
+    "format_weekend_planner_menu_message",
+    "format_weekend_planner_unavailable_message",
     "sanitize_public_url",
     "truncate_plain_text",
 ]
@@ -36,6 +50,8 @@ __all__ = [
 MAXIMUM_TELEGRAM_MESSAGE_LENGTH: Final[int] = 4096
 _MAXIMUM_LIST_TITLE_LENGTH: Final[int] = 110
 _MAXIMUM_CARD_DESCRIPTION_LENGTH: Final[int] = 1200
+_MAXIMUM_PLAN_STEP_TITLE_LENGTH: Final[int] = 90
+_WEEKDAYS_SHORT: Final[tuple[str, ...]] = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 def escape_html(value: str) -> str:
@@ -120,6 +136,7 @@ def format_help_message() -> str:
         "<b>Справка по боту «Культурный Меридиан»</b>\n\n"
         "<b>Доступные команды:</b>\n"
         "• /start — главное меню и быстрые фильтры\n"
+        "• /plan — планировщик маршрута «Выходной день» (например: <code>/plan Уфа 2000</code>)\n"
         "• /subscribe — подписка на уведомления по городу и категории\n"
         "• /unsubscribe — просмотр и удаление подписок\n"
         "• /cancel — отмена текущего шага или подтверждения\n"
@@ -401,6 +418,168 @@ def format_subscriptions_message(subscriptions: tuple[SubscriptionRecord, ...]) 
         "При отписке запись удаляется физически.</i>"
     )
     return _fit_telegram_message("\n".join(lines))
+
+
+def format_weekend_planner_menu_message(draft: WeekendPlanRequest) -> str:
+    """Формирует экран конструктора и готовых пресетов планировщика «Выходной день».
+
+    Arguments:
+        draft: Текущий черновик параметров маршрута пользователя.
+
+    Returns:
+        HTML-сообщение с параметрами маршрута и подсказкой по команде `/plan`.
+    """
+    date_label = _format_short_date(draft.target_date)
+    budget_label = "Бесплатно (0 ₽)" if draft.budget_rubles == 0 else f"до {draft.budget_rubles} ₽"
+    child_label = f"до {draft.child_age}+" if draft.child_age is not None else "без ограничений"
+
+    lines = [
+        "<b>Планировщик маршрута «Выходной день»</b>",
+        "Подберёт 2–4 непересекающихся события с учётом бюджета, возраста и времени в пути.",
+        "",
+        "<b>Текущие параметры:</b>",
+        f"• Город: <b>{escape_html(draft.city)}</b>",
+        f"• Дата: <b>{escape_html(date_label)}</b>",
+        f"• Свободное окно: <b>{draft.window_start_time:%H:%M}–{draft.window_end_time:%H:%M}</b> (+05:00)",
+        f"• Бюджет на компанию: <b>{escape_html(budget_label)}</b> · Участники: <b>{draft.companions_count} чел.</b>",
+        f"• Детский фильтр: <b>{escape_html(child_label)}</b> · Переезд: <b>до {draft.maximum_travel_minutes} мин.</b>",
+        "",
+        "Выберите готовый пресет, настройте параметры кнопками ниже или отправьте команду:",
+        "<code>/plan Уфа 2000</code> или <code>/plan Стерлитамак 1500 2</code>",
+    ]
+    return _fit_telegram_message("\n".join(lines))
+
+
+def format_weekend_plan_result_message(request: WeekendPlanRequest, result: WeekendPlanResult) -> str:
+    """Форматирует результат планировщика «Выходной день» без перегрузки текстом.
+
+    Arguments:
+        request: Запрос, по которому строился маршрут.
+        result: Итоговый результат работы `WeekendPlannerService`.
+
+    Returns:
+        Готовое HTML-сообщение в пределах лимита Telegram.
+    """
+    date_label = _format_short_date(request.target_date)
+    budget_label = "Бесплатно" if request.budget_rubles == 0 else f"до {request.budget_rubles} ₽"
+    age_suffix = f" · 👶 {request.child_age}+" if request.child_age is not None else ""
+    summary_meta = (
+        f"📅 {escape_html(date_label)} · 🕒 {request.window_start_time:%H:%M}–{request.window_end_time:%H:%M} "
+        f"(+05:00) · 👥 {request.companions_count} чел. · 💳 {escape_html(budget_label)}{age_suffix}"
+    )
+
+    if not result.is_feasible:
+        lines: list[str] = [
+            f"<b>Маршрут на выходной день не собран · {escape_html(request.city)}</b>",
+            f"<i>{summary_meta} · 🚌 ≤{request.maximum_travel_minutes} мин.</i>",
+            "",
+            escape_html(
+                result.failure_reason
+                or "Не удалось подобрать от 2 до 4 непересекающихся мероприятий при заданных ограничениях."
+            ),
+        ]
+        if result.relaxation_suggestions:
+            lines.extend(["", "<b>Что можно ослабить:</b>"])
+            for suggestion in result.relaxation_suggestions:
+                lines.append(
+                    f"• {escape_html(suggestion.explanation)} <i>({escape_html(suggestion.suggested_change)})</i>"
+                )
+        lines.extend(["", "Нажмите кнопку ниже, чтобы сразу перестроить маршрут с ослабленным ограничением."])
+        lines.append(f"<i>ℹ️ {escape_html(SERVICE_DISCLAIMER_TEXT)}</i>")
+        return _fit_telegram_message("\n".join(lines))
+
+    lines = [f"<b>Маршрут выходного дня · {escape_html(request.city)}</b>", f"<i>{summary_meta}</i>", ""]
+
+    for index, step in enumerate(result.steps, start=1):
+        lines.extend(_format_weekend_plan_step_lines(step, index=index, companions_count=request.companions_count))
+        lines.append("")
+
+    total_cost_label = _format_cost_range_label(
+        minimum_rubles=result.total_minimum_cost_rubles,
+        maximum_rubles=result.total_maximum_cost_rubles,
+        companions_count=request.companions_count,
+    )
+    lines.append(
+        f"<b>Итого:</b> {len(result.steps)} события · 💳 {escape_html(total_cost_label)} · "
+        f"🚌 в пути ~{result.total_travel_minutes} мин."
+    )
+    lines.append("Нажмите на кнопку события ниже, чтобы открыть подробную карточку.")
+    lines.append(f"<i>ℹ️ {escape_html(SERVICE_DISCLAIMER_TEXT)}</i>")
+    return _fit_telegram_message("\n".join(lines))
+
+
+def format_weekend_plan_error_message(error_message: str) -> str:
+    """Форматирует сообщение об ошибке параметров планировщика `InvalidWeekendPlanRequestError`."""
+    return (
+        "<b>Не удалось построить маршрут по заданным параметрам</b>\n\n"
+        f"{escape_html(error_message)}\n\n"
+        "Проверьте параметры или настройте маршрут через интерактивное меню ниже.\n"
+        "Пример команды: <code>/plan Уфа 2000</code>"
+    )
+
+
+def format_weekend_planner_unavailable_message() -> str:
+    """Форматирует понятное сообщение при недоступности сервиса планировщика."""
+    return (
+        "<b>Планировщик «Выходной день» временно недоступен</b>\n\n"
+        "Вы можете подобрать мероприятия через быстрые фильтры в главном меню "
+        "или обычным текстовым запросом, например: <i>«Концерт в Уфе на выходные»</i>."
+    )
+
+
+def _format_weekend_plan_step_lines(step: WeekendPlanStep, *, index: int, companions_count: int) -> list[str]:
+    local_start = _to_bashkortostan_datetime(step.starts_at)
+    local_end = _to_bashkortostan_datetime(step.ends_at)
+    short_title = truncate_plain_text(step.title, maximum_length=_MAXIMUM_PLAN_STEP_TITLE_LENGTH)
+    category_label = CATEGORY_LABELS.get(step.category, step.category.value)
+
+    step_max_total = step.price_maximum_rubles * companions_count
+    price_label = _format_cost_range_label(
+        minimum_rubles=step.total_cost_rubles, maximum_rubles=step_max_total, companions_count=companions_count
+    )
+    location_part = (
+        f"{escape_html(step.venue)}, {escape_html(step.address)}" if step.address else escape_html(step.venue)
+    )
+
+    step_lines = [
+        f"<b>{index}. {local_start:%H:%M}–{local_end:%H:%M} — {escape_html(short_title)}</b> "
+        f"<i>({escape_html(category_label)})</i>",
+        f"📍 {location_part}",
+    ]
+    if index > 1:
+        travel_label = _format_step_travel_label(step.travel_from_previous_minutes)
+        step_lines.append(f"{travel_label} · 💳 {escape_html(price_label)}")
+    else:
+        step_lines.append(f"💳 {escape_html(price_label)}")
+    return step_lines
+
+
+def _format_step_travel_label(travel_minutes: int) -> str:
+    if travel_minutes <= 0:
+        return "📍 на той же площадке"
+    if travel_minutes <= 12:
+        return f"🚶 {travel_minutes} мин"
+    return f"🚌 {travel_minutes} мин"
+
+
+def _format_cost_range_label(*, minimum_rubles: int, maximum_rubles: int, companions_count: int) -> str:
+    suffix = f" (на {companions_count} чел.)" if companions_count > 1 else ""
+    if minimum_rubles <= 0 and maximum_rubles <= 0:
+        return "Бесплатно"
+    if maximum_rubles <= minimum_rubles:
+        return f"{minimum_rubles} ₽{suffix}"
+    return f"от {minimum_rubles} до {maximum_rubles} ₽{suffix}"
+
+
+def _format_short_date(target_date: date) -> str:
+    weekday_label = _WEEKDAYS_SHORT[target_date.weekday()]
+    return f"{weekday_label}, {target_date:%d.%m.%Y}"
+
+
+def _to_bashkortostan_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=BASHKORTOSTAN_TIMEZONE)
+    return value.astimezone(BASHKORTOSTAN_TIMEZONE)
 
 
 def _format_source_line(source_name: str, source_type_label: str, source_url: str) -> str:

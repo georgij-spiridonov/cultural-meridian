@@ -42,6 +42,13 @@
             Каталог
           </a>
           <a
+            class="primary-nav__link {% if active_nav == 'planner' %}primary-nav__link--active{% endif %}"
+            href="/planner"
+            {% if active_nav == 'planner' %}aria-current="page"{% endif %}
+          >
+            Планировщик выходных
+          </a>
+          <a
             class="primary-nav__link {% if active_nav == 'subscriptions' %}primary-nav__link--active{% endif %}"
             href="/subscriptions"
             {% if active_nav == 'subscriptions' %}aria-current="page"{% endif %}

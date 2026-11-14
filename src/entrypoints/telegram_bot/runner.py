@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 _BOT_COMMANDS: Final[tuple[BotCommand, ...]] = (
     BotCommand(command="start", description="Главное меню и быстрые фильтры"),
     BotCommand(command="help", description="Справка по командам и поиску"),
+    BotCommand(command="plan", description="Планировщик маршрута «Выходной день»"),
     BotCommand(command="subscribe", description="Подписка на город и категорию"),
     BotCommand(command="unsubscribe", description="Управление и удаление подписок"),
     BotCommand(command="cancel", description="Сбросить шаг или отменить подтверждение"),

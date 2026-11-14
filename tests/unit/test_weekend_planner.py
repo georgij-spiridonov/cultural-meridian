@@ -4,9 +4,11 @@ from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from src.application.weekend_planner import WeekendPlannerService
+from src.core.configuration import PROJECT_ROOT, GeolocationSettings
 from src.core.exceptions import NetworkConnectionTimeoutError
 from src.core.types import EventCategory, EventStatus, RealCollection, SourceType
 from src.domain.entities import (
@@ -21,6 +23,7 @@ from src.domain.entities import (
 )
 from src.domain.exceptions import InvalidWeekendPlanRequestError
 from src.domain.services import BASHKORTOSTAN_TIMEZONE
+from src.infrastructure.geolocation import HybridGeolocationResolver
 
 
 class _PlannerEventRepositoryStub:
@@ -314,3 +317,328 @@ async def test_weekend_planner_resilient_to_geolocation_failure() -> None:
     assert len(result.steps) == 2
     # Фоллбэк для одного города = 15 минут
     assert result.total_travel_minutes == 15
+
+
+def _build_real_geo_settings(*, external_enabled: bool = False) -> GeolocationSettings:
+    return GeolocationSettings(
+        _env_file=None,
+        VENUES_CATALOG_PATH=PROJECT_ROOT / "configuration" / "venues_coordinates.yaml",
+        EXTERNAL_ENABLED=external_enabled,
+    )
+
+
+async def test_weekend_planner_with_real_resolver_same_venue_and_zero_travel_limit() -> None:
+    """Проверяет нулевое время переезда на одной площадке и работу при `maximum_travel_minutes=0`."""
+    same_venue_morning = _make_day_event(
+        title="Утренний показ",
+        start_hour=10,
+        duration_minutes=60,
+        price_minimum=400,
+        venue="Башкирский государственный театр оперы и балета",
+    )
+    same_venue_afternoon = _make_day_event(
+        title="Дневной балет",
+        start_hour=11,
+        duration_minutes=90,
+        price_minimum=500,
+        venue="Башкирский государственный театр оперы и балета",
+    )
+    other_venue_event = _make_day_event(
+        title="Удалённый концерт",
+        start_hour=14,
+        duration_minutes=60,
+        price_minimum=100,
+        venue="Городской дворец культуры",
+    )
+
+    repo = _PlannerEventRepositoryStub([same_venue_morning, same_venue_afternoon, other_venue_event])
+    resolver = HybridGeolocationResolver(settings=_build_real_geo_settings())
+    planner = WeekendPlannerService(event_repository=repo, geolocation_resolver=resolver)
+
+    result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(18, 0),
+            budget_rubles=2000,
+            maximum_travel_minutes=0,
+        )
+    )
+
+    assert result.is_feasible is True
+    assert [step.title for step in result.steps] == ["Утренний показ", "Дневной балет"]
+    assert result.total_travel_minutes == 0
+    assert [step.travel_from_previous_minutes for step in result.steps] == [0, 0]
+
+
+async def test_weekend_planner_with_real_resolver_two_unknown_venues_positive_travel() -> None:
+    """Проверяет ненулевое время в пути (> 0 мин) между двумя разными неизвестными площадками."""
+    event_a = _make_day_event(
+        title="Встреча в клубе А", start_hour=10, duration_minutes=60, price_minimum=200, venue="Неизвестный клуб Альфа"
+    )
+    event_b = _make_day_event(
+        title="Лекция в лофте Б", start_hour=12, duration_minutes=60, price_minimum=200, venue="Неизвестный лофт Бета"
+    )
+
+    repo = _PlannerEventRepositoryStub([event_a, event_b])
+    resolver = HybridGeolocationResolver(settings=_build_real_geo_settings())
+    planner = WeekendPlannerService(event_repository=repo, geolocation_resolver=resolver)
+
+    result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(16, 0),
+            budget_rubles=1000,
+            maximum_travel_minutes=20,
+        )
+    )
+
+    assert result.is_feasible is True
+    assert len(result.steps) == 2
+    assert result.steps[1].travel_from_previous_minutes > 0
+    assert result.total_travel_minutes == result.steps[1].travel_from_previous_minutes
+
+
+async def test_weekend_planner_with_real_resolver_close_ufa_center_vs_distant_venues() -> None:
+    """Проверяет выбор близких площадок в центре Уфы при отсечении удалённых площадок."""
+    # Центр Уфы: Оперный театр (54.722222, 55.945000) -> Национальный музей (54.722883, 55.942731) ~ 8 мин
+    # Удалённая площадка: ГДК (54.799722, 56.033333) ~ 33 мин от центра
+    center_opera = _make_day_event(
+        title="Опера в центре", start_hour=10, duration_minutes=60, price_minimum=400, venue="Башопера"
+    )
+    center_museum = _make_day_event(
+        title="Экспозиция в музее",
+        start_hour=11,
+        start_minute=30,
+        duration_minutes=60,
+        price_minimum=250,
+        venue="Национальный музей РБ",
+    )
+    distant_gdk = _make_day_event(
+        title="Концерт на окраине",
+        start_hour=13,
+        start_minute=15,
+        duration_minutes=60,
+        price_minimum=100,
+        venue="ГДК Уфа",
+    )
+
+    repo = _PlannerEventRepositoryStub([center_opera, center_museum, distant_gdk])
+    resolver = HybridGeolocationResolver(settings=_build_real_geo_settings())
+    planner = WeekendPlannerService(event_repository=repo, geolocation_resolver=resolver)
+
+    tight_travel_result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(18, 0),
+            budget_rubles=3000,
+            maximum_travel_minutes=15,
+        )
+    )
+
+    assert tight_travel_result.is_feasible is True
+    assert [step.title for step in tight_travel_result.steps] == ["Опера в центре", "Экспозиция в музее"]
+    assert 0 < tight_travel_result.total_travel_minutes <= 15
+
+    # При расширении лимита переезда удалённая площадка включается третьим шагом
+    relaxed_travel_result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(18, 0),
+            budget_rubles=3000,
+            maximum_travel_minutes=45,
+        )
+    )
+    assert relaxed_travel_result.is_feasible is True
+    assert len(relaxed_travel_result.steps) == 3
+    assert relaxed_travel_result.steps[2].travel_from_previous_minutes > 15
+
+
+async def test_weekend_planner_with_real_resolver_external_service_failure_degradation() -> None:
+    """Проверяет штатную сборку маршрута при отказе внешнего Nominatim/OSRM в реальном резолвере."""
+    event_1 = _make_day_event(
+        title="Утренний музей", start_hour=10, duration_minutes=60, price_minimum=200, venue="Музей Нестерова"
+    )
+    event_2 = _make_day_event(
+        title="Дневной театр", start_hour=12, duration_minutes=60, price_minimum=300, venue="Театр «Нур»"
+    )
+    repo = _PlannerEventRepositoryStub([event_1, event_2])
+
+    def failing_transport(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("Внешний геосервис не отвечает", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(failing_transport)) as client:
+        resolver = HybridGeolocationResolver(
+            settings=_build_real_geo_settings(external_enabled=True), http_client=client
+        )
+        planner = WeekendPlannerService(event_repository=repo, geolocation_resolver=resolver)
+
+        result = await planner.plan_weekend(
+            WeekendPlanRequest(
+                city="Уфа",
+                target_date=date(2026, 11, 21),
+                window_start_time=time(9, 0),
+                window_end_time=time(18, 0),
+                budget_rubles=1500,
+                maximum_travel_minutes=30,
+            )
+        )
+
+    assert result.is_feasible is True
+    assert len(result.steps) == 2
+    assert result.total_travel_minutes > 0
+
+
+async def test_weekend_planner_four_steps_and_exact_boundary_times() -> None:
+    """Проверяет цепочку из 4 событий и строгие граничные времена окна и стыковки переезда."""
+    # Между Башопера и Национальным музеем РБ расстояние ~0.2-0.3 км -> 8 мин по гаверсинусу (25 км/ч + 7 мин overhead).
+    # Проверим точную стыковку на границе окна (10:00..16:00) и стыковку переезда.
+    resolver = HybridGeolocationResolver(settings=_build_real_geo_settings())
+    coords_a = await resolver.resolve_venue_coordinates(city="Уфа", venue="Башопера")
+    coords_b = await resolver.resolve_venue_coordinates(city="Уфа", venue="Национальный музей РБ")
+    assert coords_a is not None and coords_b is not None
+    exact_leg_minutes = (await resolver.estimate_travel(origin=coords_a, destination=coords_b)).travel_minutes
+
+    # Шаг 1: 10:00-11:00 (граница начала окна) на Башопера
+    step_1 = _make_day_event(title="Шаг 1", start_hour=10, start_minute=0, duration_minutes=60, venue="Башопера")
+    # Шаг 2: стартует ровно в 11:00 + exact_leg_minutes на Национальный музей РБ
+    step_2_start = datetime(2026, 11, 21, 11, 0, tzinfo=BASHKORTOSTAN_TIMEZONE) + timedelta(minutes=exact_leg_minutes)
+    step_2 = _make_day_event(
+        title="Шаг 2",
+        start_hour=step_2_start.hour,
+        start_minute=step_2_start.minute,
+        duration_minutes=50,
+        venue="Национальный музей РБ",
+    )
+    # Шаг 3: на той же площадке (Национальный музей РБ), стартует ровно в 13:00 (переезд 0)
+    step_3 = _make_day_event(
+        title="Шаг 3", start_hour=13, start_minute=0, duration_minutes=60, venue="Национальный музей РБ"
+    )
+    # Шаг 4: заканчивается ровно в 16:00 (граница окончания окна), на той же площадке
+    step_4 = _make_day_event(
+        title="Шаг 4", start_hour=15, start_minute=0, duration_minutes=60, venue="Национальный музей РБ"
+    )
+    # Лишнее 5-е событие (дороже и на удалённой площадке) не должно раздуть длину маршрута сверх 4 шагов
+    step_5 = _make_day_event(
+        title="Лишний шаг 5", start_hour=16, start_minute=30, duration_minutes=30, price_minimum=2000, venue="ГДК Уфа"
+    )
+
+    repo = _PlannerEventRepositoryStub([step_1, step_2, step_3, step_4, step_5])
+    planner = WeekendPlannerService(event_repository=repo, geolocation_resolver=resolver)
+
+    result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(17, 30),
+            budget_rubles=5000,
+            maximum_travel_minutes=exact_leg_minutes,
+        )
+    )
+
+    assert result.is_feasible is True
+    assert len(result.steps) == 4
+    assert [step.title for step in result.steps] == ["Шаг 1", "Шаг 2", "Шаг 3", "Шаг 4"]
+    assert result.steps[1].travel_from_previous_minutes == exact_leg_minutes
+
+    # Проверяем точную границу окончания окна: шаг 4 (до 16:00) не проходит при window_end_time=15:59
+    tight_end_result = await planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(15, 59),
+            budget_rubles=5000,
+            maximum_travel_minutes=exact_leg_minutes,
+        )
+    )
+    assert tight_end_result.is_feasible is True
+    assert [step.title for step in tight_end_result.steps] == ["Шаг 1", "Шаг 2", "Шаг 3"]
+
+    # Если сдвинуть старт шага 2 на 1 минуту раньше, пара step_1 -> step_2 не стыкуется по дороге
+    too_early_start = step_2_start - timedelta(minutes=1)
+    too_early_step_2 = _make_day_event(
+        title="Слишком ранний шаг 2",
+        start_hour=too_early_start.hour,
+        start_minute=too_early_start.minute,
+        duration_minutes=50,
+        venue="Национальный музей РБ",
+    )
+    boundary_repo = _PlannerEventRepositoryStub([step_1, too_early_step_2])
+    boundary_planner = WeekendPlannerService(event_repository=boundary_repo, geolocation_resolver=resolver)
+    boundary_result = await boundary_planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(10, 0),
+            window_end_time=time(16, 0),
+            budget_rubles=5000,
+            maximum_travel_minutes=exact_leg_minutes,
+        )
+    )
+    assert boundary_result.is_feasible is False
+
+
+async def test_weekend_planner_combined_relaxation_and_insufficient_events_diagnostics() -> None:
+    """Проверяет комбинированную диагностику релаксации и отказ при нехватке событий (`count`)."""
+    early_expensive = _make_day_event(
+        title="Ранний дорогой концерт",
+        start_hour=9,
+        duration_minutes=60,
+        price_minimum=1200,
+        age_limit=12,
+        venue="Башопера",
+    )
+    late_expensive = _make_day_event(
+        title="Вечерний дорогой спектакль",
+        start_hour=19,
+        duration_minutes=60,
+        price_minimum=1300,
+        age_limit=12,
+        venue="Башопера",
+    )
+
+    resolver = HybridGeolocationResolver(settings=_build_real_geo_settings())
+
+    # 1. Комбинированный конфликт: одновременно малы бюджет (500), окно (11..18) и возраст (6+)
+    combo_repo = _PlannerEventRepositoryStub([early_expensive, late_expensive])
+    combo_planner = WeekendPlannerService(event_repository=combo_repo, geolocation_resolver=resolver)
+    combo_res = await combo_planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(11, 0),
+            window_end_time=time(18, 0),
+            budget_rubles=500,
+            child_age=6,
+            maximum_travel_minutes=20,
+        )
+    )
+    assert combo_res.is_feasible is False
+    suggested_names = {item.constraint_name for item in combo_res.relaxation_suggestions}
+    assert {"budget", "time_window", "age"}.issubset(suggested_names)
+    assert any("совместно с" in item.explanation for item in combo_res.relaxation_suggestions)
+
+    # 2. Недостаточно событий на день (< 2) -> диагностика count
+    single_repo = _PlannerEventRepositoryStub([early_expensive])
+    single_planner = WeekendPlannerService(event_repository=single_repo, geolocation_resolver=resolver)
+    count_res = await single_planner.plan_weekend(
+        WeekendPlanRequest(
+            city="Уфа",
+            target_date=date(2026, 11, 21),
+            window_start_time=time(8, 0),
+            window_end_time=time(22, 0),
+            budget_rubles=5000,
+        )
+    )
+    assert count_res.is_feasible is False
+    assert len(count_res.relaxation_suggestions) == 1
+    assert count_res.relaxation_suggestions[0].constraint_name == "count"

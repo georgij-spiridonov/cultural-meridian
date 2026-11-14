@@ -2,12 +2,15 @@
 
 import contextlib
 import hashlib
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
-from typing import Any, Final, override
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta
+from datetime import time as datetime_time
+from difflib import SequenceMatcher
+from typing import Any, Final, Literal, override
 from uuid import UUID, uuid4
 
 from aiogram import BaseMiddleware, F, Router
@@ -15,15 +18,23 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject, Update
 
-from src.application import EventSearchService, SubscriptionService
+from src.application import EventSearchService, SubscriptionService, WeekendPlannerService
 from src.core.configuration import TelegramSettings
 from src.core.exceptions import ApplicationException, ValidationException
 from src.core.logger import get_logger, reset_request_identifier, set_request_identifier
-from src.core.types import DialogChannel, EventCategory
-from src.domain.entities import DialogMessage, EventSearchFilter, PendingAction
+from src.core.types import DialogChannel, EventCategory, RealCollection
+from src.domain.entities import (
+    CityReference,
+    DialogMessage,
+    EventSearchFilter,
+    PendingAction,
+    WeekendPlanRequest,
+    WeekendPlanResult,
+)
 from src.domain.exceptions import (
     EventNotFoundError,
     InvalidSearchFilterError,
+    InvalidWeekendPlanRequestError,
     PendingActionExpiredError,
     PendingActionNotFoundError,
     PromptInjectionDetectedError,
@@ -32,8 +43,10 @@ from src.domain.exceptions import (
 from src.domain.ports import DialogRepositoryPort
 from src.domain.services import (
     BASHKORTOSTAN_TIMEZONE,
+    DEFAULT_BASHKORTOSTAN_CITIES,
     inspect_untrusted_text,
     normalize_optional_text,
+    normalize_text_for_matching,
     sanitize_control_characters,
 )
 from src.entrypoints.bootstrap import ApplicationContainer
@@ -53,6 +66,10 @@ from src.entrypoints.telegram_bot.formatting import (
     format_similar_events_message,
     format_start_message,
     format_subscriptions_message,
+    format_weekend_plan_error_message,
+    format_weekend_plan_result_message,
+    format_weekend_planner_menu_message,
+    format_weekend_planner_unavailable_message,
 )
 from src.entrypoints.telegram_bot.keyboards import (
     ALL_CATEGORIES_TOKEN,
@@ -65,6 +82,7 @@ from src.entrypoints.telegram_bot.keyboards import (
     RelaxFilterCallback,
     SimilarEventsCallback,
     SubscriptionCallback,
+    WeekendPlanCallback,
     build_categories_keyboard,
     build_cities_keyboard,
     build_empty_search_keyboard,
@@ -74,16 +92,116 @@ from src.entrypoints.telegram_bot.keyboards import (
     build_search_results_keyboard,
     build_similar_events_keyboard,
     build_subscriptions_keyboard,
+    build_weekend_plan_error_keyboard,
+    build_weekend_plan_result_keyboard,
+    build_weekend_planner_cities_keyboard,
+    build_weekend_planner_keyboard,
     resolve_city_from_token,
+    resolve_upcoming_weekend_dates,
 )
 from src.entrypoints.web._formatting import CATEGORY_LABELS, compute_period_range
 
-__all__ = ["TelegramBotDependencies", "TelegramUpdateMiddleware", "create_telegram_router"]
+__all__ = ["TelegramBotDependencies", "TelegramUpdateMiddleware", "WeekendPlanSessionStore", "create_telegram_router"]
 
 logger = get_logger(__name__)
 
 _MAXIMUM_SEEN_EVENT_KEYS: Final[int] = 4096
 _DEFAULT_CALLBACK_COOLDOWN_SECONDS: Final[float] = 1.0
+_DEFAULT_PLAN_CITY: Final[str] = "Уфа"
+_DEFAULT_PLAN_BUDGET_RUBLES: Final[int] = 2000
+_DEFAULT_PLAN_MAX_TRAVEL_MINUTES: Final[int] = 20
+_DEFAULT_PLAN_WINDOW_START: Final[datetime_time] = datetime_time(10, 0)
+_DEFAULT_PLAN_WINDOW_END: Final[datetime_time] = datetime_time(21, 0)
+
+
+class WeekendPlanSessionStore:
+    """Ограниченный кэш черновиков и сохранённых маршрутов планировщика для инлайн-кнопок."""
+
+    def __init__(self, *, maximum_sessions: int = 2048, maximum_tokens: int = 4096) -> None:
+        """Инициализирует хранилище состояния планировщика по сессиям и токенам."""
+        self._maximum_sessions = maximum_sessions
+        self._maximum_tokens = maximum_tokens
+        self._drafts: OrderedDict[str, WeekendPlanRequest] = OrderedDict()
+        self._plans: OrderedDict[str, tuple[str, WeekendPlanRequest, WeekendPlanResult]] = OrderedDict()
+        self._last_modes: OrderedDict[str, tuple[Literal["search", "plan"], str | None]] = OrderedDict()
+
+    def get_draft(self, session_identifier: str, *, reference_now: datetime | None = None) -> WeekendPlanRequest:
+        """Возвращает текущий черновик запроса планировщика или создаёт настройки по умолчанию."""
+        existing = self._drafts.get(session_identifier)
+        if existing is not None:
+            self._drafts.move_to_end(session_identifier)
+            return existing
+        return self._build_default_draft(reference_now=reference_now)
+
+    def save_draft(self, session_identifier: str, draft: WeekendPlanRequest) -> WeekendPlanRequest:
+        """Сохраняет обновлённый черновик параметров маршрута в сессии пользователя."""
+        self._drafts[session_identifier] = draft
+        self._drafts.move_to_end(session_identifier)
+        while len(self._drafts) > self._maximum_sessions:
+            self._drafts.popitem(last=False)
+        return draft
+
+    def save_plan(self, session_identifier: str, request: WeekendPlanRequest, result: WeekendPlanResult) -> str:
+        """Сохраняет построенный результат планировщика и возвращает компактный 8-символьный токен."""
+        self.save_draft(session_identifier, request)
+        payload = f"{session_identifier}:{request!r}:{result.is_feasible}:{len(result.steps)}"
+        token = hashlib.blake2b(payload.encode("utf-8"), digest_size=4).hexdigest()
+        self._plans[token] = (session_identifier, request, result)
+        self._plans.move_to_end(token)
+        while len(self._plans) > self._maximum_tokens:
+            self._plans.popitem(last=False)
+        self.set_last_mode(session_identifier, "plan", plan_token=token)
+        return token
+
+    def resolve_plan(
+        self, session_identifier: str, plan_token: str
+    ) -> tuple[WeekendPlanRequest, WeekendPlanResult] | None:
+        """Возвращает сохранённые запрос и результат по токену только для владельца сессии."""
+        entry = self._plans.get(plan_token)
+        if entry is None or entry[0] != session_identifier:
+            return None
+        self._plans.move_to_end(plan_token)
+        return entry[1], entry[2]
+
+    def set_last_mode(
+        self, session_identifier: str, mode: Literal["search", "plan"], *, plan_token: str | None = None
+    ) -> None:
+        """Запоминает последний активный экран выдачи для кнопки возврата из карточки события."""
+        self._last_modes[session_identifier] = (mode, plan_token)
+        self._last_modes.move_to_end(session_identifier)
+        while len(self._last_modes) > self._maximum_sessions:
+            self._last_modes.popitem(last=False)
+
+    def get_last_plan_token(self, session_identifier: str) -> str | None:
+        """Возвращает токен маршрута, если последним активным экраном был планировщик."""
+        entry = self._last_modes.get(session_identifier)
+        if entry is not None and entry[0] == "plan":
+            return entry[1]
+        return None
+
+    def reset_session(self, session_identifier: str) -> None:
+        """Сбрасывает черновик и активный режим планировщика при `/start` или `/cancel`."""
+        self._drafts.pop(session_identifier, None)
+        self._last_modes.pop(session_identifier, None)
+
+    @staticmethod
+    def _build_default_draft(*, reference_now: datetime | None = None) -> WeekendPlanRequest:
+        now = reference_now or datetime.now(tz=BASHKORTOSTAN_TIMEZONE)
+        local_now = (
+            now.replace(tzinfo=BASHKORTOSTAN_TIMEZONE) if now.tzinfo is None else now.astimezone(BASHKORTOSTAN_TIMEZONE)
+        )
+        saturday, _ = resolve_upcoming_weekend_dates(reference_now=local_now)
+        default_date = local_now.date() if local_now.weekday() in (5, 6) else saturday
+        return WeekendPlanRequest(
+            city=_DEFAULT_PLAN_CITY,
+            target_date=default_date,
+            window_start_time=_DEFAULT_PLAN_WINDOW_START,
+            window_end_time=_DEFAULT_PLAN_WINDOW_END,
+            budget_rubles=_DEFAULT_PLAN_BUDGET_RUBLES,
+            companions_count=1,
+            child_age=None,
+            maximum_travel_minutes=_DEFAULT_PLAN_MAX_TRAVEL_MINUTES,
+        )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -96,6 +214,8 @@ class TelegramBotDependencies:
         dialog_repository: Порт хранения истории диалога и ожидающих подтверждений.
         telegram_settings: Конфигурация Telegram-бота.
         filter_store: Ограниченный кэш фильтров пагинации и ослабления.
+        weekend_planner: Опциональный прикладной сервис планировщика «Выходной день».
+        plan_store: Ограниченный кэш черновиков и маршрутов планировщика.
     """
 
     search_service: EventSearchService
@@ -103,6 +223,8 @@ class TelegramBotDependencies:
     dialog_repository: DialogRepositoryPort
     telegram_settings: TelegramSettings
     filter_store: TelegramSessionFilterStore
+    weekend_planner: WeekendPlannerService | None = None
+    plan_store: WeekendPlanSessionStore = field(default_factory=WeekendPlanSessionStore)
 
 
 class TelegramUpdateMiddleware(BaseMiddleware):
@@ -211,6 +333,8 @@ def create_telegram_router(
         dialog_repository=container.dialog_repository,
         telegram_settings=container.telegram_settings,
         filter_store=TelegramSessionFilterStore(),
+        weekend_planner=_resolve_weekend_planner(container),
+        plan_store=WeekendPlanSessionStore(),
     )
 
     @router.message(CommandStart())
@@ -220,6 +344,7 @@ def create_telegram_router(
             return
         session_identifier = _build_session_identifier(message.from_user.id)
         dependencies.filter_store.reset_session(session_identifier)
+        dependencies.plan_store.reset_session(session_identifier)
         await message.answer(format_start_message(), reply_markup=build_main_menu_keyboard())
 
     @router.message(Command("help"))
@@ -236,6 +361,7 @@ def create_telegram_router(
         session_identifier = _build_session_identifier(user_identifier)
         subscriber_identifier = str(user_identifier)
         dependencies.filter_store.reset_session(session_identifier)
+        dependencies.plan_store.reset_session(session_identifier)
 
         session_state = await dependencies.dialog_repository.get_session_state(
             session_identifier=session_identifier,
@@ -327,6 +453,45 @@ def create_telegram_router(
             target=message, dependencies=dependencies, subscriber_identifier=subscriber_identifier
         )
 
+    @router.message(Command("plan"))
+    async def handle_plan_command(message: Message, command: CommandObject) -> None:
+        """Обрабатывает команду `/plan` (интерактивный конструктор или быстрый расчёт по аргументам)."""
+        if message.from_user is None:
+            return
+        if dependencies.weekend_planner is None:
+            await message.answer(format_weekend_planner_unavailable_message(), reply_markup=build_main_menu_keyboard())
+            return
+
+        user_identifier = message.from_user.id
+        session_identifier = _build_session_identifier(user_identifier)
+        subscriber_identifier = str(user_identifier)
+        raw_arguments = sanitize_control_characters(command.args or "", maximum_length=300)
+
+        if not raw_arguments or raw_arguments.lower() in {"меню", "настройка", "настройки", "пресеты"}:
+            await _send_weekend_planner_menu(
+                target=message, dependencies=dependencies, session_identifier=session_identifier
+            )
+            return
+
+        inspection = inspect_untrusted_text(raw_arguments, maximum_length=300)
+        if inspection.has_suspicious_instructions:
+            raise PromptInjectionDetectedError(
+                "Запрос отклонён: укажите город, бюджет и количество участников (например: /plan Уфа 2000).",
+                source_context="telegram_plan_command",
+                matched_patterns=inspection.matched_patterns,
+            )
+
+        cities = await dependencies.search_service.list_cities()
+        plan_request = _parse_plan_command_arguments(raw_arguments, cities=cities)
+        await _execute_and_render_weekend_plan(
+            target=message,
+            dependencies=dependencies,
+            session_identifier=session_identifier,
+            subscriber_identifier=subscriber_identifier,
+            plan_request=plan_request,
+            user_query_text=f"/plan {raw_arguments}",
+        )
+
     @router.message(F.text)
     async def handle_text_search(message: Message) -> None:
         """Обрабатывает свободный текстовый запрос Уровня 1–2 поверх `EventSearchService`."""
@@ -412,6 +577,20 @@ def create_telegram_router(
                 subscriber_identifier=subscriber_identifier,
                 edit_existing=True,
             )
+        elif action_name == "planner":
+            if dependencies.weekend_planner is None:
+                await _safe_edit_or_send(
+                    callback_query.message,
+                    text=format_weekend_planner_unavailable_message(),
+                    reply_markup=build_main_menu_keyboard(),
+                )
+            else:
+                await _send_weekend_planner_menu(
+                    target=callback_query.message,
+                    dependencies=dependencies,
+                    session_identifier=session_identifier,
+                    edit_existing=True,
+                )
         elif action_name == "reset":
             dependencies.filter_store.reset_session(session_identifier)
             reset_filter = EventSearchFilter(page=1, page_size=dependencies.telegram_settings.PAGE_SIZE)
@@ -535,12 +714,13 @@ def create_telegram_router(
 
         event = await dependencies.search_service.get_event(event_identifier=event_identifier)
         session_identifier = _build_session_identifier(callback_query.from_user.id)
+        last_plan_token = dependencies.plan_store.get_last_plan_token(session_identifier)
         active_filter = dependencies.filter_store.get_session_filter(
             session_identifier, default_page_size=dependencies.telegram_settings.PAGE_SIZE
         )
         filter_token = (
             dependencies.filter_store.save_session_filter(session_identifier, active_filter)
-            if has_active_search_constraints(active_filter) or active_filter.page > 1
+            if last_plan_token is None and (has_active_search_constraints(active_filter) or active_filter.page > 1)
             else None
         )
 
@@ -551,6 +731,7 @@ def create_telegram_router(
                 event,
                 filter_token=filter_token,
                 return_page=active_filter.page,
+                plan_token=last_plan_token,
                 public_web_base_url=dependencies.telegram_settings.PUBLIC_WEB_BASE_URL,
             ),
         )
@@ -755,6 +936,158 @@ def create_telegram_router(
         )
         await _safe_answer_callback(callback_query)
 
+    @router.callback_query(WeekendPlanCallback.filter())
+    async def handle_weekend_plan_callback(callback_query: CallbackQuery, callback_data: WeekendPlanCallback) -> None:
+        """Обрабатывает пресеты, настройку параметров, перестроение и ослабление ограничений `/plan`."""
+        if callback_query.from_user is None or not isinstance(callback_query.message, Message):
+            await _safe_answer_callback(callback_query)
+            return
+
+        if dependencies.weekend_planner is None:
+            await _safe_edit_or_send(
+                callback_query.message,
+                text=format_weekend_planner_unavailable_message(),
+                reply_markup=build_main_menu_keyboard(),
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        user_identifier = callback_query.from_user.id
+        session_identifier = _build_session_identifier(user_identifier)
+        subscriber_identifier = str(user_identifier)
+        action = callback_data.action
+        value = callback_data.value
+
+        if action == "menu":
+            await _send_weekend_planner_menu(
+                target=callback_query.message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                edit_existing=True,
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "cities":
+            cities = await dependencies.search_service.list_cities()
+            await _safe_edit_or_send(
+                callback_query.message,
+                text="<b>Планировщик «Выходной день» — выберите город:</b>",
+                reply_markup=build_weekend_planner_cities_keyboard(cities),
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "preset":
+            preset_request = _build_preset_weekend_plan_request(value)
+            await _execute_and_render_weekend_plan(
+                target=callback_query.message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                subscriber_identifier=subscriber_identifier,
+                plan_request=preset_request,
+                user_query_text=f"Пресет планировщика: {value}",
+                edit_existing=True,
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "run":
+            draft = dependencies.plan_store.get_draft(session_identifier)
+            await _execute_and_render_weekend_plan(
+                target=callback_query.message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                subscriber_identifier=subscriber_identifier,
+                plan_request=draft,
+                user_query_text=f"/plan {draft.city} {draft.budget_rubles} {draft.companions_count}",
+                edit_existing=True,
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "show":
+            resolved_plan = dependencies.plan_store.resolve_plan(session_identifier, value)
+            if resolved_plan is None:
+                await _safe_answer_callback(
+                    callback_query, text="Маршрут устарел — откройте планировщик и постройте заново."
+                )
+                await _send_weekend_planner_menu(
+                    target=callback_query.message,
+                    dependencies=dependencies,
+                    session_identifier=session_identifier,
+                    edit_existing=True,
+                )
+                return
+            saved_request, saved_result = resolved_plan
+            dependencies.plan_store.set_last_mode(session_identifier, "plan", plan_token=value)
+            await _safe_edit_or_send(
+                callback_query.message,
+                text=format_weekend_plan_result_message(saved_request, saved_result),
+                reply_markup=build_weekend_plan_result_keyboard(
+                    saved_request,
+                    saved_result,
+                    plan_token=value,
+                    public_web_base_url=dependencies.telegram_settings.PUBLIC_WEB_BASE_URL,
+                ),
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "edit":
+            resolved_plan = dependencies.plan_store.resolve_plan(session_identifier, value)
+            if resolved_plan is not None:
+                dependencies.plan_store.save_draft(session_identifier, resolved_plan[0])
+            await _send_weekend_planner_menu(
+                target=callback_query.message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                edit_existing=True,
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        if action == "relax":
+            resolved_plan = dependencies.plan_store.resolve_plan(session_identifier, value)
+            if resolved_plan is None:
+                await _safe_answer_callback(
+                    callback_query, text="Кнопка устарела — настройте маршрут в планировщике заново."
+                )
+                await _send_weekend_planner_menu(
+                    target=callback_query.message,
+                    dependencies=dependencies,
+                    session_identifier=session_identifier,
+                    edit_existing=True,
+                )
+                return
+            base_request, previous_result = resolved_plan
+            relaxed_request = _apply_weekend_plan_relaxation(
+                base_request, previous_result=previous_result, constraint_name=callback_data.extra
+            )
+            await _execute_and_render_weekend_plan(
+                target=callback_query.message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                subscriber_identifier=subscriber_identifier,
+                plan_request=relaxed_request,
+                user_query_text=f"Ослабление ограничения маршрута: {callback_data.extra}",
+                edit_existing=True,
+            )
+            await _safe_answer_callback(callback_query)
+            return
+
+        current_draft = dependencies.plan_store.get_draft(session_identifier)
+        cities = await dependencies.search_service.list_cities() if action == "city" else ()
+        updated_draft = _update_draft_from_callback(draft=current_draft, action=action, value=value, cities=cities)
+        dependencies.plan_store.save_draft(session_identifier, updated_draft)
+        await _send_weekend_planner_menu(
+            target=callback_query.message,
+            dependencies=dependencies,
+            session_identifier=session_identifier,
+            edit_existing=True,
+        )
+        await _safe_answer_callback(callback_query)
+
     return router
 
 
@@ -774,6 +1107,7 @@ async def _execute_and_render_search(
     filter_token = dependencies.filter_store.save_session_filter(
         session_identifier, search_filter, current_page=search_page.page
     )
+    dependencies.plan_store.set_last_mode(session_identifier, "search")
 
     if search_page.items:
         response_text = format_events_page_message(search_page, search_filter=search_filter)
@@ -969,6 +1303,8 @@ def _map_application_error_to_text(error: ApplicationException) -> str:
         return "Запрос на подтверждение уже выполнен, отменён или устарел."
     if isinstance(error, InvalidSearchFilterError):
         return f"Не удалось применить фильтр: {error.message}"
+    if isinstance(error, InvalidWeekendPlanRequestError):
+        return f"Некорректные параметры маршрута: {error.message}"
     if isinstance(error, PromptInjectionDetectedError):
         return error.message
     if isinstance(error, ValidationException):
@@ -1013,3 +1349,354 @@ async def _safe_edit_or_send(message: Message, *, text: str, reply_markup: Inlin
         if "message is not modified" in str(error).lower():
             return
         await message.answer(text=text, reply_markup=reply_markup)
+
+
+def _resolve_weekend_planner(container: ApplicationContainer) -> WeekendPlannerService | None:
+    candidate = getattr(container, "weekend_planner", None)
+    if isinstance(candidate, WeekendPlannerService):
+        return candidate
+    return None
+
+
+async def _send_weekend_planner_menu(
+    *, target: Message, dependencies: TelegramBotDependencies, session_identifier: str, edit_existing: bool = False
+) -> None:
+    draft = dependencies.plan_store.get_draft(session_identifier)
+    dependencies.plan_store.save_draft(session_identifier, draft)
+    text = format_weekend_planner_menu_message(draft)
+    reply_markup = build_weekend_planner_keyboard(draft)
+    if edit_existing:
+        await _safe_edit_or_send(target, text=text, reply_markup=reply_markup)
+    else:
+        await target.answer(text, reply_markup=reply_markup)
+
+
+async def _execute_and_render_weekend_plan(
+    *,
+    target: Message,
+    dependencies: TelegramBotDependencies,
+    session_identifier: str,
+    subscriber_identifier: str,
+    plan_request: WeekendPlanRequest,
+    user_query_text: str,
+    edit_existing: bool = False,
+) -> None:
+    planner = dependencies.weekend_planner
+    if planner is None:
+        unavailable_text = format_weekend_planner_unavailable_message()
+        if edit_existing:
+            await _safe_edit_or_send(target, text=unavailable_text, reply_markup=build_main_menu_keyboard())
+        else:
+            await target.answer(unavailable_text, reply_markup=build_main_menu_keyboard())
+        return
+
+    try:
+        plan_result = await planner.plan_weekend(plan_request)
+    except InvalidWeekendPlanRequestError as error:
+        error_text = format_weekend_plan_error_message(error.message)
+        error_markup = build_weekend_plan_error_keyboard()
+        if edit_existing:
+            await _safe_edit_or_send(target, text=error_text, reply_markup=error_markup)
+        else:
+            await target.answer(error_text, reply_markup=error_markup)
+        return
+
+    plan_token = dependencies.plan_store.save_plan(session_identifier, plan_request, plan_result)
+    response_text = format_weekend_plan_result_message(plan_request, plan_result)
+    reply_markup = build_weekend_plan_result_keyboard(
+        plan_request,
+        plan_result,
+        plan_token=plan_token,
+        public_web_base_url=dependencies.telegram_settings.PUBLIC_WEB_BASE_URL,
+    )
+
+    assistant_summary = (
+        f"Маршрут выходного дня ({plan_request.city}, {plan_request.target_date:%d.%m.%Y}): "
+        f"{len(plan_result.steps)} событий."
+        if plan_result.is_feasible
+        else f"Маршрут выходного дня ({plan_request.city}, {plan_request.target_date:%d.%m.%Y}) не собран."
+    )
+    await _record_dialog_messages(
+        dialog_repository=dependencies.dialog_repository,
+        session_identifier=session_identifier,
+        subscriber_identifier=subscriber_identifier,
+        history_limit=dependencies.telegram_settings.DIALOG_HISTORY_LIMIT,
+        user_text=user_query_text,
+        assistant_text=assistant_summary,
+    )
+
+    if edit_existing:
+        await _safe_edit_or_send(target, text=response_text, reply_markup=reply_markup)
+    else:
+        await target.answer(response_text, reply_markup=reply_markup)
+
+
+def _build_preset_weekend_plan_request(
+    preset_code: str, *, reference_now: datetime | None = None
+) -> WeekendPlanRequest:
+    saturday, sunday = resolve_upcoming_weekend_dates(reference_now=reference_now)
+    if preset_code == "kids6":
+        return WeekendPlanRequest(
+            city=_DEFAULT_PLAN_CITY,
+            target_date=saturday,
+            window_start_time=datetime_time(10, 0),
+            window_end_time=datetime_time(20, 0),
+            budget_rubles=2500,
+            companions_count=2,
+            child_age=6,
+            maximum_travel_minutes=_DEFAULT_PLAN_MAX_TRAVEL_MINUTES,
+        )
+    if preset_code == "ufafree":
+        return WeekendPlanRequest(
+            city=_DEFAULT_PLAN_CITY,
+            target_date=sunday,
+            window_start_time=_DEFAULT_PLAN_WINDOW_START,
+            window_end_time=_DEFAULT_PLAN_WINDOW_END,
+            budget_rubles=0,
+            companions_count=1,
+            child_age=None,
+            maximum_travel_minutes=_DEFAULT_PLAN_MAX_TRAVEL_MINUTES,
+        )
+    return WeekendPlanRequest(
+        city=_DEFAULT_PLAN_CITY,
+        target_date=saturday,
+        window_start_time=_DEFAULT_PLAN_WINDOW_START,
+        window_end_time=_DEFAULT_PLAN_WINDOW_END,
+        budget_rubles=_DEFAULT_PLAN_BUDGET_RUBLES,
+        companions_count=1,
+        child_age=None,
+        maximum_travel_minutes=_DEFAULT_PLAN_MAX_TRAVEL_MINUTES,
+    )
+
+
+def _update_draft_from_callback(
+    *,
+    draft: WeekendPlanRequest,
+    action: str,
+    value: str,
+    cities: RealCollection[CityReference],
+    reference_now: datetime | None = None,
+) -> WeekendPlanRequest:
+    saturday, sunday = resolve_upcoming_weekend_dates(reference_now=reference_now)
+    if action == "city":
+        resolved_city = resolve_city_from_token(value, cities)
+        return replace(draft, city=resolved_city) if resolved_city else draft
+    if action == "day":
+        return replace(draft, target_date=sunday if value == "sun" else saturday)
+    if action == "bud":
+        with contextlib.suppress(ValueError):
+            return replace(draft, budget_rubles=max(0, int(value)))
+    if action == "trv":
+        with contextlib.suppress(ValueError):
+            return replace(draft, maximum_travel_minutes=max(5, int(value)))
+    if action == "age":
+        if value == "none":
+            return replace(draft, child_age=None)
+        with contextlib.suppress(ValueError):
+            return replace(draft, child_age=max(0, int(value)))
+    if action == "comp":
+        with contextlib.suppress(ValueError):
+            return replace(draft, companions_count=max(1, int(value)))
+    if action == "win":
+        windows: dict[str, tuple[datetime_time, datetime_time]] = {
+            "full": (datetime_time(10, 0), datetime_time(21, 0)),
+            "day": (datetime_time(11, 0), datetime_time(18, 0)),
+            "eve": (datetime_time(15, 0), datetime_time(22, 0)),
+        }
+        if value in windows:
+            start_t, end_t = windows[value]
+            return replace(draft, window_start_time=start_t, window_end_time=end_t)
+    return draft
+
+
+def _apply_weekend_plan_relaxation(
+    request: WeekendPlanRequest,
+    *,
+    previous_result: WeekendPlanResult,
+    constraint_name: str,
+    reference_now: datetime | None = None,
+) -> WeekendPlanRequest:
+    suggestion_text = next(
+        (
+            item.suggested_change
+            for item in previous_result.relaxation_suggestions
+            if item.constraint_name == constraint_name
+        ),
+        "",
+    )
+    if constraint_name == "budget":
+        matched = re.search(r"(\d+)\s*₽", suggestion_text)
+        suggested_budget = int(matched.group(1)) if matched is not None else 0
+        fallback_budget = (
+            3000 if request.budget_rubles <= 0 else max(request.budget_rubles * 2, request.budget_rubles + 2000)
+        )
+        return replace(request, budget_rubles=max(suggested_budget, fallback_budget))
+    if constraint_name == "time_window":
+        return replace(request, window_start_time=datetime_time(0, 0), window_end_time=datetime_time(23, 59))
+    if constraint_name == "travel":
+        matched = re.search(r"(\d+)\s*мин", suggestion_text)
+        suggested_travel = int(matched.group(1)) if matched is not None else 0
+        return replace(request, maximum_travel_minutes=max(suggested_travel, request.maximum_travel_minutes + 30, 60))
+    if constraint_name == "age":
+        return replace(request, child_age=None)
+    if constraint_name == "count":
+        saturday, sunday = resolve_upcoming_weekend_dates(reference_now=reference_now)
+        next_date = sunday if request.target_date == saturday else saturday
+        return replace(request, target_date=next_date)
+    return request
+
+
+def _parse_plan_command_arguments(
+    raw_arguments: str, *, cities: RealCollection[CityReference], reference_now: datetime | None = None
+) -> WeekendPlanRequest:
+    now = reference_now or datetime.now(tz=BASHKORTOSTAN_TIMEZONE)
+    local_now = (
+        now.replace(tzinfo=BASHKORTOSTAN_TIMEZONE) if now.tzinfo is None else now.astimezone(BASHKORTOSTAN_TIMEZONE)
+    )
+    saturday, sunday = resolve_upcoming_weekend_dates(reference_now=local_now)
+    target_date: date = local_now.date() if local_now.weekday() in (5, 6) else saturday
+
+    working = raw_arguments.strip()
+
+    iso_date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", working)
+    if iso_date_match is not None:
+        with contextlib.suppress(ValueError):
+            target_date = date.fromisoformat(iso_date_match.group(1))
+            working = f"{working[: iso_date_match.start()]} {working[iso_date_match.end() :]}"
+    else:
+        dot_date_match = re.search(r"\b(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\b", working)
+        if dot_date_match is not None:
+            day_num = int(dot_date_match.group(1))
+            month_num = int(dot_date_match.group(2))
+            year_num = int(dot_date_match.group(3)) if dot_date_match.group(3) else local_now.year
+            with contextlib.suppress(ValueError):
+                target_date = date(year_num, month_num, day_num)
+                working = f"{working[: dot_date_match.start()]} {working[dot_date_match.end() :]}"
+        else:
+            date_keyword_patterns: tuple[tuple[date, re.Pattern[str]], ...] = (
+                (local_now.date(), re.compile(r"\bсегодня\b", flags=re.IGNORECASE)),
+                (local_now.date() + timedelta(days=1), re.compile(r"\bзавтра\b", flags=re.IGNORECASE)),
+                (saturday, re.compile(r"\b(?:в\s+|на\s+)?(?:сб|суббот\w*)\b", flags=re.IGNORECASE)),
+                (sunday, re.compile(r"\b(?:в\s+|на\s+)?(?:вс|воскресен\w*)\b", flags=re.IGNORECASE)),
+            )
+            for candidate_date, pattern in date_keyword_patterns:
+                match = pattern.search(working)
+                if match is not None:
+                    target_date = candidate_date
+                    working = f"{working[: match.start()]} {working[match.end() :]}"
+                    break
+
+    budget_rubles: int | None = None
+    free_pattern = re.compile(r"\b(?:бесплатн\w*|даром|free)\b", flags=re.IGNORECASE)
+    if free_pattern.search(working):
+        budget_rubles = 0
+        working = free_pattern.sub(" ", working)
+
+    child_age: int | None = None
+    child_explicit_pattern = re.compile(
+        r"(?:(?:с\s+реб[её]нком|реб[её]нк\w*|дет\w*)\s+(\d{1,2})(?:\+|(?:\s*(?:лет|года|год)))?|\b(\d{1,2})\+)",
+        flags=re.IGNORECASE,
+    )
+    child_match = child_explicit_pattern.search(working)
+    if child_match is not None:
+        age_group = child_match.group(1) or child_match.group(2)
+        if age_group is not None:
+            child_age = int(age_group)
+        working = f"{working[: child_match.start()]} {working[child_match.end() :]}"
+    else:
+        child_generic_pattern = re.compile(r"\b(?:с\s+детьми|с\s+реб[её]нк\w*|детск\w*)\b", flags=re.IGNORECASE)
+        if child_generic_pattern.search(working):
+            child_age = 6
+            working = child_generic_pattern.sub(" ", working)
+
+    maximum_travel_minutes: int | None = None
+    travel_pattern = re.compile(r"\b(\d{1,3})\s*мин(?:ут\w*)?\b", flags=re.IGNORECASE)
+    travel_match = travel_pattern.search(working)
+    if travel_match is not None:
+        maximum_travel_minutes = int(travel_match.group(1))
+        working = f"{working[: travel_match.start()]} {working[travel_match.end() :]}"
+
+    city_lookup = _build_planner_city_lookup(cities)
+    selected_city: str | None = None
+    noise_words = frozenset(
+        {"в", "во", "на", "до", "от", "за", "чел", "человек", "человека", "руб", "рублей", "рубля", "р", "₽"}
+    )
+    tokens = [token for token in working.split() if token]
+    remaining_tokens: list[str] = []
+
+    for token in tokens:
+        cleaned_token = normalize_text_for_matching(token)
+        if (
+            selected_city is None
+            and cleaned_token
+            and cleaned_token not in noise_words
+            and not re.fullmatch(r"-?\d+", token)
+        ):
+            matched_city = _match_known_city(cleaned_token, city_lookup)
+            if matched_city is not None:
+                selected_city = matched_city
+                continue
+        remaining_tokens.append(token)
+
+    companions_count: int | None = None
+    unmatched_words: list[str] = []
+    for token in remaining_tokens:
+        stripped = token.rstrip(",.;:!?₽")
+        if re.fullmatch(r"-?\d+", stripped):
+            number = int(stripped)
+            if budget_rubles is None:
+                budget_rubles = number
+            elif companions_count is None:
+                companions_count = number
+            continue
+        cleaned = normalize_text_for_matching(stripped)
+        if cleaned and cleaned not in noise_words:
+            unmatched_words.append(stripped)
+
+    if selected_city is None and unmatched_words:
+        selected_city = unmatched_words[0]
+
+    return WeekendPlanRequest(
+        city=selected_city or _DEFAULT_PLAN_CITY,
+        target_date=target_date,
+        window_start_time=_DEFAULT_PLAN_WINDOW_START,
+        window_end_time=_DEFAULT_PLAN_WINDOW_END,
+        budget_rubles=budget_rubles if budget_rubles is not None else _DEFAULT_PLAN_BUDGET_RUBLES,
+        companions_count=companions_count if companions_count is not None else 1,
+        child_age=child_age,
+        maximum_travel_minutes=maximum_travel_minutes
+        if maximum_travel_minutes is not None
+        else _DEFAULT_PLAN_MAX_TRAVEL_MINUTES,
+    )
+
+
+def _build_planner_city_lookup(cities: RealCollection[CityReference]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for canonical_name, aliases in DEFAULT_BASHKORTOSTAN_CITIES.items():
+        lookup[normalize_text_for_matching(canonical_name)] = canonical_name
+        for alias in aliases:
+            lookup[normalize_text_for_matching(alias)] = canonical_name
+    for city_reference in cities:
+        lookup[normalize_text_for_matching(city_reference.name)] = city_reference.name
+        lookup[normalize_text_for_matching(city_reference.normalized_name)] = city_reference.name
+        for alias in city_reference.aliases:
+            lookup[normalize_text_for_matching(alias)] = city_reference.name
+    return lookup
+
+
+def _match_known_city(cleaned_token: str, city_lookup: dict[str, str]) -> str | None:
+    if cleaned_token in city_lookup:
+        return city_lookup[cleaned_token]
+    if len(cleaned_token) >= 5:
+        best_city: str | None = None
+        best_ratio = 0.0
+        for alias_key, canonical_name in city_lookup.items():
+            if abs(len(alias_key) - len(cleaned_token)) > 3:
+                continue
+            ratio = SequenceMatcher(None, cleaned_token, alias_key).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_city = canonical_name
+        if best_city is not None and best_ratio >= 0.8:
+            return best_city
+    return None
