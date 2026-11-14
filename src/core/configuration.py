@@ -1,5 +1,6 @@
 """Глобальная конфигурация ядра приложения."""
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
@@ -14,17 +15,27 @@ __all__ = [
     "PROJECT_ROOT",
     "ApplicationSettings",
     "DatabaseSettings",
+    "LanguageModelSettings",
     "LoggingSettings",
     "TelegramSettings",
     "WebSettings",
     "get_application_settings",
     "get_database_settings",
+    "get_language_model_settings",
     "get_logging_settings",
     "get_telegram_settings",
     "get_web_settings",
 ]
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
+DEFAULT_LANGUAGE_MODEL_PRICING_JSON: Final[str] = json.dumps(
+    {
+        "google/gemini-3.5-flash-lite": {"input": 24.0, "output": 200.0},
+        "google/gemini-4-hydrogen": {"input": 135.0, "output": 675.0},
+    },
+    ensure_ascii=False,
+    sort_keys=True,
+)
 
 
 class ApplicationSettings(BaseSettings):
@@ -217,6 +228,185 @@ class TelegramSettings(BaseSettings):
             Нормализованная строка без крайних пробелов.
         """
         return value.strip().rstrip("/")
+
+
+def _extract_tariff_rate(tariffs: dict[object, object], primary_key: str, fallback_key: str, model_name: str) -> float:
+    """Извлекает и валидирует неотрицательный тариф модели из словаря тарифов.
+
+    Arguments:
+        tariffs: Словарь тарифов конкретной модели.
+        primary_key: Основной ключ тарифа (`input` или `output`).
+        fallback_key: Резервный ключ тарифа (`input_rubles_per_million` или `output_rubles_per_million`).
+        model_name: Имя модели для информативного сообщения об ошибке.
+
+    Returns:
+        Неотрицательная стоимость за миллион токенов в рублях.
+
+    Raises:
+        ValueError: Если ключ отсутствует или значение не является неотрицательным числом.
+    """
+    raw_value = tariffs.get(primary_key, tariffs.get(fallback_key))
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int | float):
+        raise ValueError(f"Для модели '{model_name}' отсутствует числовой тариф '{primary_key}'.")
+    rate = float(raw_value)
+    if rate < 0.0:
+        raise ValueError(f"Тариф '{primary_key}' для модели '{model_name}' не может быть отрицательным.")
+    return rate
+
+
+def _parse_pricing_payload(value: str | dict[str, dict[str, float]]) -> dict[str, tuple[float, float]]:
+    """Разбирает и валидирует таблицу тарифов языковых моделей в рублях за 1M токенов.
+
+    Arguments:
+        value: JSON-строка или словарь с тарифами моделей.
+
+    Returns:
+        Словарь вида `{model_name: (input_rubles_per_million, output_rubles_per_million)}`.
+
+    Raises:
+        ValueError: При некорректном JSON, неверной структуре или отрицательных тарифах.
+    """
+    raw_payload: object
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return {}
+        try:
+            raw_payload = json.loads(stripped)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Некорректный JSON в LANGUAGE_MODEL_PRICING_JSON: {error}") from error
+    else:
+        raw_payload = value
+
+    if not isinstance(raw_payload, dict):
+        raise ValueError("LANGUAGE_MODEL_PRICING_JSON должен быть JSON-объектом или словарём.")
+
+    pricing_map: dict[str, tuple[float, float]] = {}
+    for raw_model_name, raw_tariffs in raw_payload.items():
+        if not isinstance(raw_model_name, str) or not raw_model_name.strip():
+            raise ValueError("Имя модели в LANGUAGE_MODEL_PRICING_JSON должно быть непустой строкой.")
+        if not isinstance(raw_tariffs, dict):
+            raise ValueError(f"Тарифы модели '{raw_model_name}' должны быть словарём.")
+        model_name = raw_model_name.strip()
+        input_rate = _extract_tariff_rate(raw_tariffs, "input", "input_rubles_per_million", model_name)
+        output_rate = _extract_tariff_rate(raw_tariffs, "output", "output_rubles_per_million", model_name)
+        pricing_map[model_name] = (input_rate, output_rate)
+    return pricing_map
+
+
+class LanguageModelSettings(BaseSettings):
+    """Настройки языковой модели, провайдера OpenRouter и бюджетных ограничений ИИ-слоя.
+
+    Attributes:
+        BASE_URL: Базовый URL OpenAI-совместимого API провайдера (по умолчанию OpenRouter).
+        API_KEY: Секретный ключ доступа к API языковой модели.
+        PRIMARY: Идентификатор основной модели для рассуждений и диалога.
+        FAST: Идентификатор быстрой модели для структурированного извлечения и классификации.
+        PRICING_JSON: Таблица тарифов моделей (JSON-строка или словарь в рублях за 1M токенов).
+        REQUEST_TIMEOUT_SECONDS: Таймаут одного HTTP-запроса к языковой модели в секундах.
+        MAX_RETRIES: Максимальное число повторных попыток при временных сбоях сети/API.
+        MAX_AGENT_STEPS: Максимальное число шагов (вызовов инструментов) агента за один ход.
+        MAX_OUTPUT_TOKENS: Максимальное число выходных токенов в одном ответе модели.
+        USER_DAILY_BUDGET_RUBLES: Дневной лимит расходов на одного пользователя в рублях.
+        GLOBAL_DAILY_BUDGET_RUBLES: Общий дневной лимит расходов всего сервиса в рублях.
+        USD_TO_RUB_RATE: Курс пересчёта USD в RUB при использовании резервного биллинга из `raw_usage`.
+        HTTP_REFERER: Заголовок `HTTP-Referer` для атрибуции запросов в OpenRouter.
+        APP_TITLE: Заголовок `X-Title` для атрибуции приложения в OpenRouter.
+        PROMPT_VERSION: Версия системного промпта агента для аудита и трассировки.
+        PREFER_EU_ENDPOINT: Переключать стандартный endpoint OpenRouter на EU-регион (`eu.openrouter.ai`).
+        PROVIDER_SORT: Стратегия сортировки провайдеров OpenRouter (`latency`, `throughput`, `price` или пусто).
+        USE_FAST_SYNTHESIS_MODEL: Использовать быструю модель (`FAST`) для синтеза ответа после инструментов.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="LANGUAGE_MODEL_",
+        extra="ignore",
+        env_ignore_empty=True,
+        frozen=True,
+    )
+
+    BASE_URL: str = "https://openrouter.ai/api/v1"
+    API_KEY: str = ""
+    PRIMARY: str = "google/gemini-4-hydrogen"
+    FAST: str = "google/gemini-3.5-flash-lite"
+    PRICING_JSON: str | dict[str, dict[str, float]] = DEFAULT_LANGUAGE_MODEL_PRICING_JSON
+    REQUEST_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0)
+    MAX_RETRIES: int = Field(default=1, ge=0, le=5)
+    MAX_AGENT_STEPS: int = Field(default=5, ge=1, le=5)
+    MAX_OUTPUT_TOKENS: int = Field(default=8192, ge=64, le=16384)
+    USER_DAILY_BUDGET_RUBLES: float = Field(default=15.0, ge=0.0)
+    GLOBAL_DAILY_BUDGET_RUBLES: float = Field(default=250.0, ge=0.0)
+    USD_TO_RUB_RATE: float = Field(default=90.0, gt=0.0)
+    HTTP_REFERER: str = "https://cultural-meridian.local"
+    APP_TITLE: str = "Cultural Meridian"
+    PROMPT_VERSION: str = "v1.0"
+    PREFER_EU_ENDPOINT: bool = False
+    PROVIDER_SORT: str = "latency"
+    USE_FAST_SYNTHESIS_MODEL: bool = True
+
+    @field_validator("BASE_URL", "HTTP_REFERER", mode="after")
+    @classmethod
+    def strip_url_option(cls, value: str) -> str:
+        """Удаляет крайние пробелы и завершающий слеш у URL-параметров конфигурации.
+
+        Arguments:
+            value: Исходное строковое значение URL.
+
+        Returns:
+            Нормализованный URL без крайних пробелов и завершающего слеша.
+        """
+        return value.strip().rstrip("/")
+
+    @field_validator("API_KEY", "PRIMARY", "FAST", "APP_TITLE", "PROMPT_VERSION", mode="after")
+    @classmethod
+    def strip_plain_text_option(cls, value: str) -> str:
+        """Удаляет крайние пробелы у текстовых параметров конфигурации языковой модели.
+
+        Arguments:
+            value: Исходное строковое значение параметра.
+
+        Returns:
+            Строка без крайних пробельных символов.
+        """
+        return value.strip()
+
+    @field_validator("PRICING_JSON", mode="after")
+    @classmethod
+    def normalize_pricing_json(cls, value: str | dict[str, dict[str, float]]) -> str:
+        """Валидирует и нормализует таблицу тарифов в неизменяемую JSON-строку.
+
+        Arguments:
+            value: Исходная JSON-строка или словарь тарифов.
+
+        Returns:
+            Каноническая JSON-строка с отсортированными ключами моделей.
+        """
+        pricing_map = _parse_pricing_payload(value)
+        normalized: dict[str, dict[str, float]] = {
+            model_name: {"input": input_rate, "output": output_rate}
+            for model_name, (input_rate, output_rate) in sorted(pricing_map.items())
+        }
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+    def get_pricing_map(self) -> dict[str, tuple[float, float]]:
+        """Возвращает словарь тарифов моделей `(input_rubles_per_million, output_rubles_per_million)`.
+
+        Returns:
+            Словарь тарифов в рублях за один миллион токенов для каждой настроенной модели.
+        """
+        return _parse_pricing_payload(self.PRICING_JSON)
+
+
+@lru_cache
+def get_language_model_settings() -> LanguageModelSettings:
+    """Возвращает кэшированный экземпляр настроек языковой модели и ИИ-слоя.
+
+    Returns:
+        Неизменяемые настройки языковой модели.
+    """
+    return LanguageModelSettings()
 
 
 @lru_cache
