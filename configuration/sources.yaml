@@ -1,0 +1,69 @@
+# Декларативный реестр источников культурной афиши Республики Башкортостан.
+# Активные локальные фиды обеспечивают воспроизводимый офлайн-сбор без внешней сети,
+# а отключённые шаблоны документируют подключение реальных региональных порталов.
+
+sources:
+  - name: ufa_culture_rss
+    source_type: rss
+    source_url: data/local_feeds/ufa_afisha.rss.xml
+    default_city: Уфа
+    default_category: null
+    is_enabled: true
+    request_timeout_seconds: 5.0
+
+  - name: sterlitamak_afisha_api
+    source_type: api
+    source_url: data/local_feeds/sterlitamak_events.json
+    default_city: Стерлитамак
+    default_category: null
+    is_enabled: true
+    request_timeout_seconds: 5.0
+
+  - name: salavat_theaters_html
+    source_type: webpage
+    source_url: data/local_feeds/salavat_afisha.html
+    default_city: Салават
+    default_category: spectacle
+    is_enabled: true
+    request_timeout_seconds: 5.0
+
+  - name: neftekamsk_philharmonic_api
+    source_type: api
+    source_url: data/local_feeds/neftekamsk_events.json
+    default_city: Нефтекамск
+    default_category: concert
+    is_enabled: true
+    request_timeout_seconds: 5.0
+
+  # Отключённые шаблоны реальных внешних источников Республики Башкортостан и РФ.
+  - name: culture_rf_bashkortostan_api
+    source_type: api
+    source_url: https://www.culture.ru/api/v1/events?region=bashkortostan
+    default_city: null
+    default_category: null
+    is_enabled: false
+    request_timeout_seconds: 8.0
+
+  - name: minkult_rb_rss
+    source_type: rss
+    source_url: https://culture.bashkortostan.ru/presscenter/news/rss/
+    default_city: Уфа
+    default_category: null
+    is_enabled: false
+    request_timeout_seconds: 6.0
+
+  - name: bashopera_repertoire_html
+    source_type: webpage
+    source_url: https://www.bashopera.ru/repertoire/
+    default_city: Уфа
+    default_category: spectacle
+    is_enabled: false
+    request_timeout_seconds: 6.0
+
+  - name: bashgf_afisha_html
+    source_type: webpage
+    source_url: https://bashgf.ru/afisha/
+    default_city: Уфа
+    default_category: concert
+    is_enabled: false
+    request_timeout_seconds: 6.0
