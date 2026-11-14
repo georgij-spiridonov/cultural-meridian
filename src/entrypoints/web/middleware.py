@@ -94,15 +94,25 @@ class RequestMetricsCollector:
 class InMemoryRateLimiter:
     """Ограничитель частоты запросов со скользящим окном по IP-адресу и области действия."""
 
-    def __init__(self, *, general_limit_per_minute: int, feedback_limit_per_minute: int) -> None:
-        """Инициализирует лимиты запросов в минуту для общего контура и формы обратной связи.
+    def __init__(
+        self,
+        *,
+        general_limit_per_minute: int,
+        feedback_limit_per_minute: int,
+        assistant_limit_per_minute: int | None = None,
+    ) -> None:
+        """Инициализирует лимиты запросов в минуту для общего контура, обратной связи и ассистента.
 
         Arguments:
             general_limit_per_minute: Общий порог запросов с одного адреса за 60 секунд.
             feedback_limit_per_minute: Порог отправок формы обратной связи за 60 секунд.
+            assistant_limit_per_minute: Порог обращений к ИИ-ассистенту за 60 секунд.
         """
         self._general_limit = general_limit_per_minute
         self._feedback_limit = feedback_limit_per_minute
+        self._assistant_limit = (
+            assistant_limit_per_minute if assistant_limit_per_minute is not None else min(general_limit_per_minute, 30)
+        )
         self._lock = Lock()
         self._buckets: dict[tuple[str, str], deque[float]] = {}
 
@@ -111,12 +121,17 @@ class InMemoryRateLimiter:
 
         Arguments:
             client_address: Нормализованный адрес клиента.
-            scope: Контур ограничения (`general` или `feedback`).
+            scope: Контур ограничения (`general`, `feedback` или `assistant`).
 
         Returns:
             Кортеж `(allowed, retry_after_seconds)`.
         """
-        limit = self._feedback_limit if scope == "feedback" else self._general_limit
+        if scope == "feedback":
+            limit = self._feedback_limit
+        elif scope == "assistant":
+            limit = self._assistant_limit
+        else:
+            limit = self._general_limit
         now = time.monotonic()
         cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
         bucket_key = (scope, client_address)

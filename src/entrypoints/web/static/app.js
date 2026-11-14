@@ -152,16 +152,161 @@
     dialog.showModal();
   });
 
-  /* Объявление результатов HTMX в live-region и синхронизация ссылки sharing */
+  /* Разрешаем HTMX подмену фрагмента веб-чата при ошибках валидации (422) и rate limit (429) */
+  document.body.addEventListener("htmx:beforeSwap", function (event) {
+    const detail = event.detail;
+    if (!detail || !detail.target || detail.target.id !== "assistant-chat" || !detail.xhr) {
+      return;
+    }
+    const statusCode = detail.xhr.status;
+    if (statusCode === 422 || statusCode === 429) {
+      detail.shouldSwap = true;
+      detail.isError = false;
+    }
+  });
+
+  /* Переключение панели технических сведений и трассы по бейджу «Только проверенный каталог» */
+  let tracePanelExpanded = false;
+
+  function syncTracePanelState() {
+    const toggle = document.querySelector("[data-assistant-trace-toggle]");
+    const panel = document.querySelector("[data-assistant-trace-panel]");
+    if (toggle instanceof HTMLElement) {
+      toggle.setAttribute("aria-expanded", String(tracePanelExpanded));
+    }
+    if (panel instanceof HTMLElement) {
+      panel.hidden = !tracePanelExpanded;
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    const target =
+      event.target instanceof Element ? event.target.closest("[data-assistant-trace-toggle]") : null;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    tracePanelExpanded = !tracePanelExpanded;
+    syncTracePanelState();
+    announce(
+      tracePanelExpanded
+        ? "Технические сведения и трасса ответа показаны."
+        : "Технические сведения и трасса ответа скрыты."
+    );
+  });
+
+  syncTracePanelState();
+
+  /* Объявление результатов HTMX в live-region и обновление состояния веб-чата */
   document.body.addEventListener("htmx:afterSwap", function (event) {
     const detailTarget = event.detail && event.detail.target;
-    if (detailTarget && detailTarget.id === "catalog-results") {
+    if (!detailTarget) {
+      return;
+    }
+
+    if (detailTarget.id === "catalog-results") {
       const countNode = detailTarget.querySelector("[data-results-count]");
       if (countNode) {
         announce(countNode.textContent || "Выдача мероприятий обновлена.");
       }
+      return;
+    }
+
+    if (detailTarget.id === "assistant-chat") {
+      syncTracePanelState();
+      const errorNode = detailTarget.querySelector('[data-assistant-status="error"]');
+      const noticeNode = detailTarget.querySelector('[data-assistant-status="notice"]');
+      const answerNode = detailTarget.querySelector("[data-assistant-answer-text]");
+      const clarifyingNode = detailTarget.querySelector("[data-assistant-clarifying]");
+      const pendingNode = detailTarget.querySelector("[data-pending-action-id]");
+      const messagesList = detailTarget.querySelector("[data-assistant-messages]");
+
+      if (messagesList) {
+        messagesList.scrollTop = messagesList.scrollHeight;
+      }
+
+      if (errorNode) {
+        announce(errorNode.textContent || "Ошибка при обращении к ассистенту.");
+        return;
+      }
+
+      const composerInput = document.getElementById("assistant-user-message");
+      const requestElt = event.detail && event.detail.elt;
+      if (
+        composerInput instanceof HTMLTextAreaElement &&
+        requestElt instanceof Element &&
+        requestElt.closest("[data-assistant-turn-form], [data-assistant-reset-form]")
+      ) {
+        composerInput.value = "";
+        composerInput.setAttribute("aria-invalid", "false");
+        composerInput.removeAttribute("aria-describedby");
+        const composerError = document.getElementById("assistant-user-message-error");
+        if (composerError) {
+          composerError.hidden = true;
+        }
+      }
+
+      if (pendingNode) {
+        announce("Требуется подтверждение действия. Используйте кнопки «Подтвердить» или «Отменить».");
+      } else if (answerNode && answerNode.textContent && answerNode.textContent.trim()) {
+        const prefix = clarifyingNode ? "Новый ответ и уточняющий вопрос ассистента: " : "Ответ ассистента: ";
+        announce(prefix + answerNode.textContent.trim());
+      } else if (noticeNode && noticeNode.textContent && noticeNode.textContent.trim()) {
+        announce(noticeNode.textContent.trim());
+      } else {
+        announce("Состояние диалога с ассистентом обновлено.");
+      }
     }
   });
+
+  /* Клавиатурная навигация по быстрым подсказкам и отправка по Enter в чате /assistant */
+  const assistantForm = document.querySelector("[data-assistant-turn-form]");
+  const assistantInput = document.getElementById("assistant-user-message");
+  if (assistantForm instanceof HTMLFormElement && assistantInput instanceof HTMLTextAreaElement) {
+    assistantInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        if (typeof assistantForm.requestSubmit === "function") {
+          assistantForm.requestSubmit();
+        } else {
+          assistantForm.submit();
+        }
+      }
+    });
+  }
+
+  const promptsList = document.querySelector("[data-assistant-prompts-list]");
+  if (promptsList) {
+    promptsList.addEventListener("keydown", function (event) {
+      const currentChip =
+        event.target instanceof Element ? event.target.closest("[data-assistant-prompt]") : null;
+      if (!(currentChip instanceof HTMLElement)) {
+        return;
+      }
+      const chips = Array.from(promptsList.querySelectorAll("[data-assistant-prompt]")).filter(
+        function (node) {
+          return node instanceof HTMLElement;
+        }
+      );
+      if (chips.length === 0) {
+        return;
+      }
+      const currentIndex = chips.indexOf(currentChip);
+      let nextIndex = -1;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (currentIndex + 1) % chips.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (currentIndex - 1 + chips.length) % chips.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = chips.length - 1;
+      }
+      if (nextIndex >= 0) {
+        event.preventDefault();
+        chips[nextIndex].focus();
+      }
+    });
+  }
 
   /* Интерактивный конструктор виджета на /widget/demo */
   const demoForm = document.getElementById("widget-config-form");

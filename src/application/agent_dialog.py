@@ -13,7 +13,7 @@
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Final
+from typing import Final, Literal
 from uuid import UUID, uuid4
 
 from src.application._helpers import attach_default_timezone, resolve_normalized_city
@@ -193,7 +193,7 @@ class AgentDialogService:
         """
         started_at = time.perf_counter()
         resolved_request_id = normalize_optional_text(request_identifier) or str(uuid4())
-        reference_now = attach_default_timezone(current_datetime or datetime.now())
+        reference_now = attach_default_timezone(current_datetime or datetime.now(tz=BASHKORTOSTAN_TIMEZONE))
         trace_id = uuid4()
 
         inspection = inspect_untrusted_text(user_message)
@@ -362,6 +362,78 @@ class AgentDialogService:
             save_dialog_messages=bool(inspection.cleaned_text),
         )
 
+    async def resolve_pending_action(
+        self,
+        *,
+        action_identifier: UUID,
+        session_identifier: str,
+        channel: DialogChannel,
+        subscriber_identifier: str,
+        decision: Literal["confirm", "cancel"],
+        request_identifier: str | None = None,
+        current_datetime: datetime | None = None,
+    ) -> AgentTurnResult:
+        """Явно подтверждает или отменяет отложенное действие с записью реплик и трассы.
+
+        Arguments:
+            action_identifier: Идентификатор ожидающего подтверждения действия.
+            session_identifier: Идентификатор диалоговой сессии владельца действия.
+            channel: Канал взаимодействия пользователя.
+            subscriber_identifier: Технический идентификатор пользователя без ПДн.
+            decision: Решение пользователя (`"confirm"` или `"cancel"`).
+            request_identifier: Сквозной идентификатор запроса для трассировки.
+            current_datetime: Опорные дата и время для проверки срока действия.
+
+        Returns:
+            Итоговый результат обработки подтверждения или отмены с `trace_identifier`.
+
+        Raises:
+            ValidationException: Если передано некорректное решение или пустые идентификаторы.
+        """
+        if decision not in ("confirm", "cancel"):
+            raise ValidationException("Некорректное решение по отложенному действию (ожидается confirm или cancel).")
+        cleaned_session = session_identifier.strip()
+        cleaned_subscriber = subscriber_identifier.strip()
+        if not cleaned_session or not cleaned_subscriber:
+            raise ValidationException("Идентификаторы сессии и пользователя не могут быть пустыми.")
+
+        started_at = time.perf_counter()
+        resolved_request_id = normalize_optional_text(request_identifier) or str(uuid4())
+        reference_now = attach_default_timezone(current_datetime or datetime.now(tz=BASHKORTOSTAN_TIMEZONE))
+        trace_id = uuid4()
+
+        result, resolved_status = await self._resolve_pending_action_decision(
+            action_identifier=action_identifier,
+            decision=decision,
+            session_identifier=cleaned_session,
+            channel=channel,
+            subscriber_identifier=cleaned_subscriber,
+            reference_now=reference_now,
+            trace_identifier=trace_id,
+        )
+
+        plan_summaries = {
+            "confirmed": "Явное подтверждение и выполнение отложенного действия.",
+            "canceled": "Явная отмена отложенного действия пользователем.",
+            "expired": "Попытка подтверждения просроченного отложенного действия.",
+            "not_found": "Отложенное действие не найдено или принадлежит другой сессии.",
+        }
+        user_query = "Подтвердить действие" if decision == "confirm" else "Отменить действие"
+
+        return await self._persist_turn(
+            result=result,
+            trace_identifier=trace_id,
+            request_identifier=resolved_request_id,
+            session_identifier=cleaned_session,
+            channel=channel,
+            subscriber_identifier=cleaned_subscriber,
+            user_query=user_query,
+            reference_now=reference_now,
+            started_at=started_at,
+            plan_summary=plan_summaries[resolved_status],
+            save_dialog_messages=resolved_status != "not_found",
+        )
+
     def _resolve_prompt_version(self) -> str:
         """Возвращает версию системного промпта из настроек или пустую строку."""
         return self._language_model_settings.PROMPT_VERSION if self._language_model_settings is not None else ""
@@ -418,57 +490,103 @@ class AgentDialogService:
         if not normalized_decision:
             return None
 
+        decision: Literal["confirm", "cancel"]
         if normalized_decision in _CANCELLATION_PHRASES:
+            decision = "cancel"
+        elif normalized_decision in _CONFIRMATION_PHRASES:
+            decision = "confirm"
+        else:
+            return None
+
+        result, _ = await self._resolve_pending_action_decision(
+            action_identifier=pending_action.action_identifier,
+            decision=decision,
+            session_identifier=session_identifier,
+            channel=channel,
+            subscriber_identifier=subscriber_identifier,
+            reference_now=reference_now,
+            trace_identifier=trace_identifier,
+        )
+        return result
+
+    async def _resolve_pending_action_decision(
+        self,
+        *,
+        action_identifier: UUID,
+        decision: Literal["confirm", "cancel"],
+        session_identifier: str,
+        channel: DialogChannel,
+        subscriber_identifier: str,
+        reference_now: datetime,
+        trace_identifier: UUID,
+    ) -> tuple[AgentTurnResult, Literal["confirmed", "canceled", "expired", "not_found"]]:
+        """Выполняет отмену или подтверждение отложенного действия с обработкой отсутствия и TTL."""
+        prompt_version = self._resolve_prompt_version()
+
+        if decision == "cancel":
             try:
                 await self._dialog_repository.cancel_pending_action(
-                    action_identifier=pending_action.action_identifier, session_identifier=session_identifier
+                    action_identifier=action_identifier, session_identifier=session_identifier
                 )
-                answer_text = "Хорошо, отложенное действие отменено. Можем продолжить подбор мероприятий."
+                return (
+                    AgentTurnResult(
+                        answer_text="Хорошо, отложенное действие отменено. Можем продолжить подбор мероприятий.",
+                        trace_identifier=trace_identifier,
+                        model_name=_CONFIRMATION_MODEL_NAME,
+                        prompt_version=prompt_version,
+                    ),
+                    "canceled",
+                )
             except PendingActionNotFoundError:
-                answer_text = "Активный запрос на подтверждение уже отменён или завершён."
-
-            return AgentTurnResult(
-                answer_text=answer_text,
-                trace_identifier=trace_identifier,
-                model_name=_CONFIRMATION_MODEL_NAME,
-                prompt_version=self._resolve_prompt_version(),
-            )
-
-        if normalized_decision not in _CONFIRMATION_PHRASES:
-            return None
+                return (
+                    AgentTurnResult(
+                        answer_text="Активный запрос на подтверждение не найден, уже отменён или завершён.",
+                        trace_identifier=trace_identifier,
+                        model_name=_CONFIRMATION_MODEL_NAME,
+                        prompt_version=prompt_version,
+                    ),
+                    "not_found",
+                )
 
         try:
             consumed = await self._dialog_repository.consume_pending_action(
-                action_identifier=pending_action.action_identifier,
-                session_identifier=session_identifier,
-                current_time=reference_now,
+                action_identifier=action_identifier, session_identifier=session_identifier, current_time=reference_now
             )
         except PendingActionExpiredError:
-            return AgentTurnResult(
-                answer_text=(
-                    "Срок действия запроса на подтверждение истёк. "
-                    "Пожалуйста, повторите просьбу о подписке или обращении, если это ещё актуально."
+            return (
+                AgentTurnResult(
+                    answer_text=(
+                        "Срок действия запроса на подтверждение истёк. "
+                        "Пожалуйста, повторите просьбу о подписке или обращении, если это ещё актуально."
+                    ),
+                    trace_identifier=trace_identifier,
+                    model_name=_CONFIRMATION_MODEL_NAME,
+                    prompt_version=prompt_version,
                 ),
-                trace_identifier=trace_identifier,
-                model_name=_CONFIRMATION_MODEL_NAME,
-                prompt_version=self._resolve_prompt_version(),
+                "expired",
             )
         except PendingActionNotFoundError:
-            return AgentTurnResult(
-                answer_text="Запрос на подтверждение не найден или уже был выполнен ранее.",
-                trace_identifier=trace_identifier,
-                model_name=_CONFIRMATION_MODEL_NAME,
-                prompt_version=self._resolve_prompt_version(),
+            return (
+                AgentTurnResult(
+                    answer_text="Запрос на подтверждение не найден или уже был выполнен ранее.",
+                    trace_identifier=trace_identifier,
+                    model_name=_CONFIRMATION_MODEL_NAME,
+                    prompt_version=prompt_version,
+                ),
+                "not_found",
             )
 
         answer_text = await self._execute_confirmed_action(
             consumed=consumed, channel=channel, subscriber_identifier=subscriber_identifier
         )
-        return AgentTurnResult(
-            answer_text=answer_text,
-            trace_identifier=trace_identifier,
-            model_name=_CONFIRMATION_MODEL_NAME,
-            prompt_version=self._resolve_prompt_version(),
+        return (
+            AgentTurnResult(
+                answer_text=answer_text,
+                trace_identifier=trace_identifier,
+                model_name=_CONFIRMATION_MODEL_NAME,
+                prompt_version=prompt_version,
+            ),
+            "confirmed",
         )
 
     async def _execute_confirmed_action(
@@ -710,7 +828,7 @@ class AgentDialogService:
     ) -> AgentTurnResult:
         """Сохраняет реплики диалога, учёт токенов/стоимости и запись трассировки."""
         if save_dialog_messages:
-            assistant_timestamp = attach_default_timezone(datetime.now())
+            assistant_timestamp = datetime.now(tz=BASHKORTOSTAN_TIMEZONE)
             if assistant_timestamp < reference_now:
                 assistant_timestamp = reference_now
             assistant_content = _format_assistant_history_content(result)

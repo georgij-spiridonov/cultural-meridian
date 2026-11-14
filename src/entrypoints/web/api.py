@@ -1,7 +1,7 @@
 """Версионированный REST API `/api/v1`, OpenAPI 3.1 схемы и единый обработчик ошибок."""
 
 from datetime import date, datetime, time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.application import EventSearchService, SubscriptionService, WeekendPlannerService
+from src.application import AgentDialogService, EventSearchService, SubscriptionService, WeekendPlannerService
 from src.core.exceptions import (
     ApplicationException,
     InfrastructureException,
@@ -20,6 +20,7 @@ from src.core.exceptions import (
 from src.core.logger import get_logger
 from src.core.types import DialogChannel, EventCategory, EventStatus, SourceType
 from src.domain.entities import (
+    AgentTurnResult,
     CityReference,
     ConstraintRelaxationSuggestion,
     EmptySearchExplanation,
@@ -30,6 +31,8 @@ from src.domain.entities import (
     EventSourceReference,
     FeedbackRequestRecord,
     FeedbackStatus,
+    PendingAction,
+    PendingActionType,
     SortDirection,
     SubscriptionRecord,
     VenueReference,
@@ -44,13 +47,17 @@ from src.domain.exceptions import (
     InvalidSearchFilterError,
     InvalidWeekendPlanRequestError,
     ModerationItemNotFoundError,
+    PendingActionExpiredError,
+    PendingActionNotFoundError,
     PromptInjectionDetectedError,
+    RateLimitExceededError,
     SubscriptionNotFoundError,
     UnsupportedSourceFormatError,
 )
-from src.domain.services import normalize_optional_text
+from src.domain.services import normalize_optional_text, sanitize_control_characters
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.web._formatting import (
+    ASSISTANT_MAX_MESSAGE_LENGTH,
     CATEGORY_LABELS,
     build_entity_etag,
     compute_period_range,
@@ -60,6 +67,10 @@ from src.entrypoints.web._formatting import (
 from src.entrypoints.web.middleware import InMemoryRateLimiter, RequestMetricsCollector
 
 __all__ = [
+    "AssistantPendingActionSchema",
+    "AssistantPendingDecisionApiRequest",
+    "AssistantTurnApiRequest",
+    "AssistantTurnApiResponse",
     "CityReferenceSchema",
     "ConstraintRelaxationSchema",
     "EmptySearchExplanationSchema",
@@ -708,6 +719,97 @@ class WeekendPlanApiResponse(BaseModel):
         )
 
 
+class AssistantTurnApiRequest(BaseModel):
+    """Запрос на выполнение одного шага диалога с ИИ-ассистентом."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "session_identifier": "web:web-visitor-001:session-001",
+                "subscriber_identifier": "web-visitor-001",
+                "user_message": "Куда сходить в Уфе в выходные бесплатно?",
+                "channel": "web",
+            }
+        },
+    )
+
+    session_identifier: str = Field(min_length=1, max_length=128)
+    subscriber_identifier: str = Field(min_length=1, max_length=128)
+    user_message: str = Field(min_length=1, max_length=ASSISTANT_MAX_MESSAGE_LENGTH)
+    channel: DialogChannel = DialogChannel.WEB
+
+
+class AssistantPendingDecisionApiRequest(BaseModel):
+    """Запрос на явное подтверждение или отмену отложенного действия ассистента."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    session_identifier: str = Field(min_length=1, max_length=128)
+    subscriber_identifier: str = Field(min_length=1, max_length=128)
+    channel: DialogChannel = DialogChannel.WEB
+
+
+class AssistantPendingActionSchema(BaseModel):
+    """Отложенное изменяющее действие, ожидающее подтверждения пользователя."""
+
+    model_config = ConfigDict(frozen=True)
+
+    action_identifier: UUID
+    action_type: PendingActionType
+    confirmation_prompt: str
+    expires_at: datetime
+
+    @classmethod
+    def from_domain(cls, pending_action: PendingAction) -> AssistantPendingActionSchema:
+        """Преобразует доменное отложенное действие в схему REST API."""
+        return cls(
+            action_identifier=pending_action.action_identifier,
+            action_type=pending_action.action_type,
+            confirmation_prompt=pending_action.confirmation_prompt,
+            expires_at=pending_action.expires_at,
+        )
+
+
+class AssistantTurnApiResponse(BaseModel):
+    """Результат шага диалога с ИИ-ассистентом или детерминированным резервным поиском."""
+
+    model_config = ConfigDict(frozen=True)
+
+    answer_text: str
+    clarifying_question: str | None = None
+    recommended_events: list[EventSummarySchema] = Field(default_factory=list)
+    explanations_by_event: dict[str, str] = Field(default_factory=dict)
+    pending_action: AssistantPendingActionSchema | None = None
+    fallback_used: bool
+    fallback_reason: str | None = None
+    trace_identifier: UUID | None = None
+    model_name: str
+
+    @classmethod
+    def from_domain(cls, result: AgentTurnResult) -> AssistantTurnApiResponse:
+        """Преобразует результат хода диалога `AgentTurnResult` в схему REST API."""
+        return cls(
+            answer_text=result.answer_text,
+            clarifying_question=result.clarifying_question,
+            recommended_events=[EventSummarySchema.from_domain(event) for event in result.recommended_events],
+            explanations_by_event={
+                str(event_identifier): explanation
+                for event_identifier, explanation in result.explanations_by_event.items()
+            },
+            pending_action=(
+                AssistantPendingActionSchema.from_domain(result.pending_action)
+                if result.pending_action is not None
+                else None
+            ),
+            fallback_used=result.fallback_used,
+            fallback_reason=result.fallback_reason,
+            trace_identifier=result.trace_identifier,
+            model_name=result.model_name,
+        )
+
+
 def _get_container(request: Request) -> ApplicationContainer:
     container = getattr(request.app.state, "container", None)
     if not isinstance(container, ApplicationContainer):
@@ -727,6 +829,12 @@ def _get_subscription_service(
 
 def _get_weekend_planner(container: Annotated[ApplicationContainer, Depends(_get_container)]) -> WeekendPlannerService:
     return container.weekend_planner
+
+
+def _get_agent_dialog_service(
+    container: Annotated[ApplicationContainer, Depends(_get_container)],
+) -> AgentDialogService:
+    return container.agent_dialog_service
 
 
 def _get_rate_limiter(request: Request) -> InMemoryRateLimiter:
@@ -1085,7 +1193,11 @@ def create_api_router() -> APIRouter:
         client_address = request.client.host if request.client is not None else "unknown"
         allowed, retry_after = rate_limiter.check_and_consume(client_address=client_address, scope="feedback")
         if not allowed:
-            raise _FeedbackRateLimitExceededError(retry_after_seconds=retry_after)
+            raise _EndpointRateLimitExceededError(
+                error_code="feedback_rate_limit_exceeded",
+                message="Слишком частая отправка обращений. Повторите попытку чуть позже.",
+                retry_after_seconds=retry_after,
+            )
 
         if normalize_optional_text(payload.honeypot_website) is not None:
             raise ValidationException("Запрос отклонён системой защиты от автоматического спама.")
@@ -1123,26 +1235,146 @@ def create_api_router() -> APIRouter:
         )
         return WeekendPlanApiResponse.from_domain(result)
 
+    @router.post(
+        "/assistant/turn",
+        response_model=AssistantTurnApiResponse,
+        responses={422: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
+        tags=["ИИ-ассистент"],
+        summary="Выполнить шаг диалога с ИИ-ассистентом или резервным поиском",
+    )
+    async def assistant_turn(
+        payload: AssistantTurnApiRequest,
+        request: Request,
+        agent_dialog_service: Annotated[AgentDialogService, Depends(_get_agent_dialog_service)],
+        rate_limiter: Annotated[InMemoryRateLimiter, Depends(_get_rate_limiter)],
+    ) -> AssistantTurnApiResponse:
+        """Обрабатывает сообщение пользователя, соблюдая ограничения частоты запросов и защиту от инъекций."""
+        client_address = request.client.host if request.client is not None else "unknown"
+        allowed, retry_after = rate_limiter.check_and_consume(client_address=client_address, scope="assistant")
+        if not allowed:
+            raise _EndpointRateLimitExceededError(
+                error_code="assistant_rate_limit_exceeded",
+                message="Слишком частые обращения к ИИ-ассистенту. Повторите попытку чуть позже.",
+                retry_after_seconds=retry_after,
+            )
+
+        cleaned_session = normalize_optional_text(
+            sanitize_control_characters(payload.session_identifier, maximum_length=128)
+        )
+        cleaned_subscriber = normalize_optional_text(
+            sanitize_control_characters(payload.subscriber_identifier, maximum_length=128)
+        )
+        cleaned_message = normalize_optional_text(
+            sanitize_control_characters(payload.user_message, maximum_length=ASSISTANT_MAX_MESSAGE_LENGTH)
+        )
+        if cleaned_session is None or cleaned_subscriber is None:
+            raise ValidationException("Идентификаторы сессии и пользователя не могут быть пустыми.")
+        if cleaned_message is None:
+            raise ValidationException("Сообщение пользователя не может быть пустым.")
+
+        request_identifier = getattr(request.state, "request_identifier", None)
+        result = await agent_dialog_service.handle_message(
+            session_identifier=cleaned_session,
+            channel=payload.channel,
+            subscriber_identifier=cleaned_subscriber,
+            user_message=cleaned_message,
+            request_identifier=request_identifier if isinstance(request_identifier, str) else None,
+        )
+        return AssistantTurnApiResponse.from_domain(result)
+
+    async def _resolve_pending_action_api_decision(
+        *,
+        action_identifier: UUID,
+        payload: AssistantPendingDecisionApiRequest,
+        request: Request,
+        agent_dialog_service: AgentDialogService,
+        decision: Literal["confirm", "cancel"],
+    ) -> AssistantTurnApiResponse:
+        cleaned_session = normalize_optional_text(
+            sanitize_control_characters(payload.session_identifier, maximum_length=128)
+        )
+        cleaned_subscriber = normalize_optional_text(
+            sanitize_control_characters(payload.subscriber_identifier, maximum_length=128)
+        )
+        if cleaned_session is None or cleaned_subscriber is None:
+            raise ValidationException("Идентификаторы сессии и пользователя не могут быть пустыми.")
+
+        request_identifier = getattr(request.state, "request_identifier", None)
+        result = await agent_dialog_service.resolve_pending_action(
+            action_identifier=action_identifier,
+            session_identifier=cleaned_session,
+            channel=payload.channel,
+            subscriber_identifier=cleaned_subscriber,
+            decision=decision,
+            request_identifier=request_identifier if isinstance(request_identifier, str) else None,
+        )
+        return AssistantTurnApiResponse.from_domain(result)
+
+    @router.post(
+        "/assistant/pending/{action_identifier}/confirm",
+        response_model=AssistantTurnApiResponse,
+        responses={404: {"model": ErrorResponse}, 410: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        tags=["ИИ-ассистент"],
+        summary="Подтвердить отложенное действие ИИ-ассистента",
+    )
+    async def confirm_assistant_pending_action(
+        action_identifier: UUID,
+        payload: AssistantPendingDecisionApiRequest,
+        request: Request,
+        agent_dialog_service: Annotated[AgentDialogService, Depends(_get_agent_dialog_service)],
+    ) -> AssistantTurnApiResponse:
+        """Явно подтверждает ожидающее действие в рамках текущей диалоговой сессии."""
+        return await _resolve_pending_action_api_decision(
+            action_identifier=action_identifier,
+            payload=payload,
+            request=request,
+            agent_dialog_service=agent_dialog_service,
+            decision="confirm",
+        )
+
+    @router.post(
+        "/assistant/pending/{action_identifier}/cancel",
+        response_model=AssistantTurnApiResponse,
+        responses={404: {"model": ErrorResponse}, 410: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        tags=["ИИ-ассистент"],
+        summary="Отменить отложенное действие ИИ-ассистента",
+    )
+    async def cancel_assistant_pending_action(
+        action_identifier: UUID,
+        payload: AssistantPendingDecisionApiRequest,
+        request: Request,
+        agent_dialog_service: Annotated[AgentDialogService, Depends(_get_agent_dialog_service)],
+    ) -> AssistantTurnApiResponse:
+        """Явно отменяет ожидающее действие в рамках текущей диалоговой сессии."""
+        return await _resolve_pending_action_api_decision(
+            action_identifier=action_identifier,
+            payload=payload,
+            request=request,
+            agent_dialog_service=agent_dialog_service,
+            decision="cancel",
+        )
+
     return router
 
 
-class _FeedbackRateLimitExceededError(ApplicationException):
-    """Внутреннее исключение превышения лимита отправки формы обратной связи."""
+class _EndpointRateLimitExceededError(ApplicationException):
+    """Внутреннее исключение превышения лимита частоты запросов на конечную точку."""
 
-    def __init__(self, *, retry_after_seconds: int) -> None:
-        super().__init__("Слишком частая отправка обращений. Повторите попытку чуть позже.")
+    def __init__(self, *, error_code: str, message: str, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.error_code = error_code
         self.retry_after_seconds = retry_after_seconds
 
 
 def register_exception_handlers(app: FastAPI) -> None:
     """Регистрирует централизованные обработчики исключений с единым форматом `ErrorResponse`."""
 
-    @app.exception_handler(_FeedbackRateLimitExceededError)
-    async def handle_feedback_rate_limit(request: Request, error: _FeedbackRateLimitExceededError) -> JSONResponse:
+    @app.exception_handler(_EndpointRateLimitExceededError)
+    async def handle_endpoint_rate_limit(request: Request, error: _EndpointRateLimitExceededError) -> JSONResponse:
         return _build_error_json_response(
             request=request,
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            code="feedback_rate_limit_exceeded",
+            code=error.error_code,
             message=error.message,
             details={"retry_after_seconds": error.retry_after_seconds},
             headers={"Retry-After": str(error.retry_after_seconds)},
@@ -1193,8 +1425,14 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 
 def _map_application_exception_to_http(error: ApplicationException) -> tuple[int, str]:
-    if isinstance(error, (EventNotFoundError, ModerationItemNotFoundError, SubscriptionNotFoundError)):
+    if isinstance(
+        error, (EventNotFoundError, ModerationItemNotFoundError, SubscriptionNotFoundError, PendingActionNotFoundError)
+    ):
         return status.HTTP_404_NOT_FOUND, _camel_to_snake_code(type(error).__name__)
+    if isinstance(error, PendingActionExpiredError):
+        return status.HTTP_410_GONE, _camel_to_snake_code(type(error).__name__)
+    if isinstance(error, RateLimitExceededError):
+        return status.HTTP_429_TOO_MANY_REQUESTS, _camel_to_snake_code(type(error).__name__)
     if isinstance(error, DuplicateEventConflictError):
         return status.HTTP_409_CONFLICT, "duplicate_event_conflict"
     if isinstance(

@@ -22,19 +22,24 @@ from src.domain.services import BASHKORTOSTAN_TIMEZONE, normalize_optional_text
 __all__ = [
     "ADMIN_SESSION_COOKIE_NAME",
     "ALLOWED_AGE_OPTIONS",
+    "ASSISTANT_MAX_MESSAGE_LENGTH",
+    "ASSISTANT_SESSION_COOKIE_NAME",
     "CATEGORY_LABELS",
     "PERIOD_LABELS",
     "SERVICE_DISCLAIMER_TEXT",
     "SOURCE_TYPE_LABELS",
     "VISITOR_COOKIE_NAME",
     "CatalogQueryParameters",
+    "build_assistant_session_identifier",
     "build_catalog_url_query",
     "build_entity_etag",
     "build_search_filter_from_parameters",
     "compute_period_range",
     "format_date_range_label",
+    "format_dialog_time_label",
     "format_price_label",
     "format_status_label",
+    "generate_assistant_session_token",
     "generate_visitor_identifier",
     "parse_date_boundary",
     "parse_time_value",
@@ -49,7 +54,9 @@ SERVICE_DISCLAIMER_TEXT: Final[str] = (
 )
 
 VISITOR_COOKIE_NAME: Final[str] = "cultural_meridian_visitor"
+ASSISTANT_SESSION_COOKIE_NAME: Final[str] = "cm_assistant_session"
 ADMIN_SESSION_COOKIE_NAME: Final[str] = "cultural_meridian_moderator"
+ASSISTANT_MAX_MESSAGE_LENGTH: Final[int] = 2000
 
 CATEGORY_LABELS: Final[dict[EventCategory, str]] = {
     EventCategory.CONCERT: "Концерты",
@@ -398,6 +405,16 @@ def format_status_label(status: EventStatus) -> str:
     return "Отменено"
 
 
+def format_dialog_time_label(moment: datetime) -> str:
+    """Форматирует временную метку реплики диалога в часовом поясе Башкортостана."""
+    local_moment = (
+        moment.replace(tzinfo=BASHKORTOSTAN_TIMEZONE)
+        if moment.tzinfo is None
+        else moment.astimezone(BASHKORTOSTAN_TIMEZONE)
+    )
+    return local_moment.strftime("%d.%m %H:%M")
+
+
 def build_entity_etag(prefix: str, payload: object) -> str:
     """Вычисляет детерминированный HTTP-заголовок ETag для ресурса или справочника."""
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -408,6 +425,20 @@ def build_entity_etag(prefix: str, payload: object) -> str:
 def generate_visitor_identifier() -> str:
     """Создаёт случайный технический идентификатор браузерного посетителя без ПДн."""
     return f"web-{uuid4()}"
+
+
+def generate_assistant_session_token() -> str:
+    """Создаёт случайный суффикс-токен диалоговой сессии веб-ассистента."""
+    return uuid4().hex[:16]
+
+
+def build_assistant_session_identifier(*, visitor_identifier: str, session_token: str) -> str:
+    """Формирует стабильный идентификатор диалоговой сессии длиной не более 128 символов."""
+    candidate = f"web:{visitor_identifier}:{session_token}"
+    if len(candidate) <= 128:
+        return candidate
+    visitor_digest = hashlib.sha256(visitor_identifier.encode("utf-8")).hexdigest()[:24]
+    return f"web:{visitor_digest}:{session_token}"[:128]
 
 
 def sign_admin_session(*, username: str, secret: str, ttl_seconds: int) -> str:

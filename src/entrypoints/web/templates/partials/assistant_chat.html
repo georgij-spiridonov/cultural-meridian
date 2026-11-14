@@ -1,0 +1,214 @@
+{% set _turn = turn_result if turn_result is defined and turn_result is not none else (last_result if last_result is defined and last_result is not none else none) %}
+{% set _messages = messages if messages is defined and messages is not none else (recent_messages if recent_messages is defined and recent_messages is not none else (session_state.recent_messages if session_state is defined and session_state is not none else ())) %}
+{% set _answer_text = answer_text if answer_text is defined and answer_text is not none else (_turn.answer_text if _turn is not none else none) %}
+{% set _clarifying_question = clarifying_question if clarifying_question is defined and clarifying_question is not none else (_turn.clarifying_question if _turn is not none else none) %}
+{% set _recommended_events = recommended_events if recommended_events is defined and recommended_events is not none else (_turn.recommended_events if _turn is not none else ()) %}
+{% set _explanations = explanations_by_event if explanations_by_event is defined and explanations_by_event is not none else (_turn.explanations_by_event if _turn is not none else {}) %}
+{% set _fallback_used = fallback_used if fallback_used is defined and fallback_used is not none else (_turn.fallback_used if _turn is not none else false) %}
+{% set _fallback_reason = fallback_reason if fallback_reason is defined and fallback_reason is not none else (_turn.fallback_reason if _turn is not none else none) %}
+{% set _trace_id = trace_identifier if trace_identifier is defined and trace_identifier is not none else (_turn.trace_identifier if _turn is not none else none) %}
+{% set _pending = active_pending_action if active_pending_action is defined and active_pending_action is not none else (pending_action if pending_action is defined and pending_action is not none else (_turn.pending_action if _turn is not none and _turn.pending_action is not none else (session_state.active_pending_action if session_state is defined and session_state is not none else none))) %}
+{% set _error_text = error_message if error_message is defined and error_message else none %}
+{% set _notice_text = notice_message if notice_message is defined and notice_message else none %}
+{% set _show_distinct_answer = _answer_text and (not _error_text or _answer_text != _error_text) %}
+
+{% if _error_text %}
+  <div class="alert alert--danger assistant-alert" role="alert" data-assistant-status="error">
+    <div><strong>Не удалось выполнить запрос:</strong> {{ _error_text }}</div>
+  </div>
+{% endif %}
+
+{% if _notice_text %}
+  <div class="alert alert--success assistant-alert" role="status" data-assistant-status="notice">
+    {{ _notice_text }}
+  </div>
+{% endif %}
+
+{% if _fallback_used %}
+  <div class="alert alert--warning assistant-fallback-banner" role="status" data-assistant-fallback="true">
+    <strong>Работает детерминированный поиск по каталогу без ИИ-модели.</strong>
+    Подборка сформирована напрямую по подтверждённым карточкам базы сервиса.
+    {% if _fallback_reason %}
+      <span class="assistant-fallback-banner__reason">Причина перехода: {{ _fallback_reason }}.</span>
+    {% endif %}
+  </div>
+{% endif %}
+
+<aside
+  id="assistant-trace-panel"
+  class="assistant-trace-panel"
+  aria-label="Технические сведения и трасса ответа"
+  data-assistant-trace-panel="true"
+  hidden
+>
+  <div class="assistant-trace-panel__header">
+    {% if _fallback_used %}
+      <span class="badge badge--warning">Резервный поиск</span>
+    {% else %}
+      <span class="badge badge--neutral">По данным каталога</span>
+    {% endif %}
+    {% if _trace_id %}
+      <div class="assistant-trace-meta">
+        <span>Трасса:</span>
+        <code class="assistant-trace-id" data-assistant-trace-id="{{ _trace_id }}">{{ _trace_id }}</code>
+      </div>
+    {% else %}
+      <span class="assistant-trace-empty">Трасса появится после первого ответа ассистента.</span>
+    {% endif %}
+  </div>
+  <p class="assistant-trust-note">
+    Источник доверия: подбор и факты сформированы строго по данным каталога и инструментам сервиса «Культурный Меридиан», а не «мнением модели».
+  </p>
+</aside>
+
+<section class="assistant-history" aria-labelledby="assistant-history-heading">
+  <h3 id="assistant-history-heading" class="assistant-history__heading">
+    История диалога{% if _messages %} (последних реплик: {{ _messages | length }}){% endif %}
+  </h3>
+
+  {% set _last_message = _messages[-1] if _messages else none %}
+  {% set _ephemeral_answer = _show_distinct_answer and (not _last_message or _last_message.role != "assistant" or _last_message.content != _answer_text) %}
+
+  {% if _messages or _ephemeral_answer %}
+    <ol class="assistant-messages" data-assistant-messages="true">
+      {% for msg in _messages %}
+        {% set is_user = msg.role == "user" %}
+        <li class="assistant-message {% if is_user %}assistant-message--user{% else %}assistant-message--assistant{% endif %}">
+          <div class="assistant-message__meta">
+            <span class="assistant-message__role">{% if is_user %}Вы{% else %}Ассистент{% endif %}</span>
+            {% if msg.created_at %}
+              <time datetime="{{ msg.created_at.isoformat() }}">
+                {% if format_dialog_time is defined %}
+                  {{ format_dialog_time(msg.created_at) }}
+                {% elif format_notification_time is defined %}
+                  {{ format_notification_time(msg.created_at) }}
+                {% else %}
+                  {{ msg.created_at.strftime("%d.%m.%Y %H:%M") }}
+                {% endif %}
+              </time>
+            {% endif %}
+          </div>
+          <p class="assistant-message__content" {% if loop.last and not is_user and not _ephemeral_answer %}data-assistant-answer-text="true"{% endif %}>{{ msg.content }}</p>
+        </li>
+      {% endfor %}
+      {% if _ephemeral_answer %}
+        <li class="assistant-message assistant-message--assistant" data-assistant-ephemeral="true">
+          <div class="assistant-message__meta">
+            <span class="assistant-message__role">Ассистент</span>
+          </div>
+          <p class="assistant-message__content" data-assistant-answer-text="true">{{ _answer_text }}</p>
+        </li>
+      {% endif %}
+    </ol>
+  {% else %}
+    <div class="alert alert--info assistant-alert" role="status">
+      Диалог ещё не начат. Задайте вопрос своими словами или выберите один из быстрых сценариев выше.
+    </div>
+  {% endif %}
+</section>
+
+{% if _clarifying_question %}
+  <div class="alert alert--info assistant-clarifying" role="status" data-assistant-clarifying="true">
+    <strong>Уточняющий вопрос:</strong> {{ _clarifying_question }}
+  </div>
+{% endif %}
+
+{% if _pending %}
+  <section
+    class="assistant-pending-card"
+    aria-labelledby="assistant-pending-heading"
+    data-pending-action-id="{{ _pending.action_identifier }}"
+  >
+    <div class="assistant-pending-card__header">
+      <span class="badge badge--warning">Требуется подтверждение</span>
+      <h3 id="assistant-pending-heading" class="assistant-pending-card__title">
+        {% if _pending.action_type == "subscribe" %}
+          Подтверждение оформления подписки
+        {% elif _pending.action_type == "save_feedback" %}
+          Подтверждение отправки обращения
+        {% else %}
+          Подтверждение действия
+        {% endif %}
+      </h3>
+    </div>
+
+    <p class="assistant-pending-card__prompt">{{ _pending.confirmation_prompt }}</p>
+
+    <div class="assistant-pending-card__actions">
+      <form
+        action="/assistant/pending/{{ _pending.action_identifier }}/confirm"
+        method="post"
+        hx-post="/assistant/pending/{{ _pending.action_identifier }}/confirm"
+        hx-target="#assistant-chat"
+        hx-swap="innerHTML"
+        hx-indicator="#assistant-loading"
+      >
+        <button class="button button--primary button--small" type="submit">Подтвердить</button>
+      </form>
+
+      <form
+        action="/assistant/pending/{{ _pending.action_identifier }}/cancel"
+        method="post"
+        hx-post="/assistant/pending/{{ _pending.action_identifier }}/cancel"
+        hx-target="#assistant-chat"
+        hx-swap="innerHTML"
+        hx-indicator="#assistant-loading"
+      >
+        <button class="button button--danger button--small" type="submit">Отменить</button>
+      </form>
+    </div>
+  </section>
+{% endif %}
+
+{% if _recommended_events %}
+  <section class="assistant-events" aria-labelledby="assistant-events-heading">
+    <h3 id="assistant-events-heading" class="assistant-events__heading">
+      Рекомендованные мероприятия ({{ _recommended_events | length }})
+    </h3>
+
+    <div class="events-grid">
+      {% for event in _recommended_events %}
+        {% set explanation_text = _explanations.get(event.identifier) or _explanations.get(event.identifier | string) %}
+        <article class="event-card">
+          <div>
+            <div class="event-card__badges">
+              <span class="badge badge--category">{{ category_labels.get(event.category, event.category.value) }}</span>
+              {% if event.status.value == "canceled" %}
+                <span class="badge badge--danger">Отменено</span>
+              {% endif %}
+              {% if event.is_free %}
+                <span class="badge badge--free">Бесплатно</span>
+              {% endif %}
+              <span class="badge badge--neutral">{{ event.age_limit }}+</span>
+              {% if event.language %}
+                <span class="badge badge--neutral">{{ event.language }}</span>
+              {% endif %}
+            </div>
+
+            <h4 class="event-card__title">
+              <a href="/events/{{ event.identifier }}">{{ event.title }}</a>
+            </h4>
+
+            <ul class="event-card__meta">
+              <li><strong>Когда:</strong> {{ format_date_range(event) }} (+05:00)</li>
+              <li><strong>Где:</strong> {{ event.city }}, {{ event.venue }}</li>
+            </ul>
+
+            {% if explanation_text %}
+              <p class="assistant-event-card__explanation">
+                <strong>Почему подходит:</strong> {{ explanation_text }}
+              </p>
+            {% endif %}
+          </div>
+
+          <div class="event-card__footer">
+            <span class="event-card__price">{{ format_price(event) }}</span>
+            <a class="button button--small button--primary" href="/events/{{ event.identifier }}">
+              Подробнее
+            </a>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}

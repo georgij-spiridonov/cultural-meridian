@@ -1,5 +1,6 @@
-"""SSR и HTMX-маршруты публичного веб-каталога, карточки события, подписок и обратной связи."""
+"""SSR и HTMX-маршруты публичного веб-каталога, карточки события, ассистента, подписок и обратной связи."""
 
+import contextlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -16,8 +17,10 @@ from src.application import EventSearchService, WeekendPlannerService
 from src.core.exceptions import ApplicationException
 from src.core.types import DialogChannel, EventCategory, EventStatus
 from src.domain.entities import (
+    AgentTurnResult,
     CityReference,
     ConstraintRelaxationSuggestion,
+    DialogSessionState,
     EmptySearchExplanation,
     Event,
     EventSearchFilter,
@@ -27,22 +30,32 @@ from src.domain.entities import (
     WeekendPlanRequest,
     WeekendPlanResult,
 )
-from src.domain.exceptions import EventNotFoundError, InvalidSearchFilterError, InvalidWeekendPlanRequestError
-from src.domain.services import BASHKORTOSTAN_TIMEZONE, normalize_optional_text
+from src.domain.exceptions import (
+    EventNotFoundError,
+    InvalidSearchFilterError,
+    InvalidWeekendPlanRequestError,
+    PendingActionNotFoundError,
+)
+from src.domain.services import BASHKORTOSTAN_TIMEZONE, normalize_optional_text, sanitize_control_characters
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.web._formatting import (
     ALLOWED_AGE_OPTIONS,
+    ASSISTANT_MAX_MESSAGE_LENGTH,
+    ASSISTANT_SESSION_COOKIE_NAME,
     CATEGORY_LABELS,
     PERIOD_LABELS,
     SERVICE_DISCLAIMER_TEXT,
     SOURCE_TYPE_LABELS,
     VISITOR_COOKIE_NAME,
     CatalogQueryParameters,
+    build_assistant_session_identifier,
     build_catalog_url_query,
     build_search_filter_from_parameters,
     format_date_range_label,
+    format_dialog_time_label,
     format_price_label,
     format_status_label,
+    generate_assistant_session_token,
     generate_visitor_identifier,
     parse_time_value,
 )
@@ -56,6 +69,40 @@ _CATEGORY_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(
 _PERIOD_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(PERIOD_LABELS.items())
 _CATALOG_NOTIFICATIONS_LIMIT = 3
 _SUBSCRIPTIONS_NOTIFICATIONS_LIMIT = 20
+_ASSISTANT_SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+_ASSISTANT_RESET_NOTICE = "Начат новый диалог. Ваши подписки и настройки сохранены."
+_ASSISTANT_QUICK_SCENARIOS: tuple[dict[str, str], ...] = (
+    {
+        "title": "Куда сходить в Уфе в выходные?",
+        "prompt": "Куда сходить в Уфе в выходные?",
+        "description": "Подборка актуальных событий Уфы на ближайшие субботу и воскресенье.",
+        "url": "/?city=Уфа&period=weekend",
+    },
+    {
+        "title": "С ребёнком 7 лет до 1000 ₽",
+        "prompt": "С ребёнком 7 лет до 1000 ₽",
+        "description": "Семейные спектакли, выставки и программы с учётом возраста и бюджета.",
+        "url": "/?period=weekend&maximum_age_limit=6&maximum_price=1000",
+    },
+    {
+        "title": "А подешевле",
+        "prompt": "А подешевле",
+        "description": "Уточнить предыдущую подборку с более низкой ценой билета.",
+        "url": "/?maximum_price=500",
+    },
+    {
+        "title": "Только бесплатные",
+        "prompt": "Только бесплатные",
+        "description": "Показать только бесплатные культурные мероприятия со свободным входом.",
+        "url": "/?only_free=true",
+    },
+    {
+        "title": "Составь маршрут на выходной",
+        "prompt": "Составь маршрут на выходной в Уфе",
+        "description": "Подобрать непересекающийся план из 2–4 событий с учётом времени в пути.",
+        "url": "/planner",
+    },
+)
 
 
 def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
@@ -555,38 +602,210 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         return RedirectResponse(url=f"/subscriptions?{redirect_query}", status_code=status.HTTP_303_SEE_OTHER)
 
     @router.get("/assistant", response_class=HTMLResponse)
-    async def assistant_preview_page(request: Request) -> HTMLResponse:
-        """Рендерит обзорную страницу сценариев ИИ-помощника и быстрых пресетов каталога."""
-        return templates.TemplateResponse(
+    async def assistant_page(request: Request) -> Response:
+        """Рендерит страницу веб-чата ИИ-ассистента с восстановлением истории и ожидающих действий."""
+        container = _require_container(request)
+        visitor_identifier, session_token, session_identifier, set_visitor, set_session = _resolve_assistant_session(
+            request
+        )
+        history_limit = max(10, container.telegram_settings.DIALOG_HISTORY_LIMIT)
+        session_state = await container.dialog_repository.get_session_state(
+            session_identifier=session_identifier,
+            channel=DialogChannel.WEB,
+            subscriber_identifier=visitor_identifier,
+            message_limit=history_limit,
+        )
+        notice_message = _ASSISTANT_RESET_NOTICE if request.query_params.get("notice") == "reset" else None
+        response = templates.TemplateResponse(
             request=request,
             name="assistant.html",
-            context=await _base_page_context(
-                request=request,
-                active_nav="assistant",
-                quick_scenarios=(
-                    {
-                        "title": "С ребёнком в Стерлитамаке до 1000 ₽ на выходных",
-                        "description": "Быстрый отбор семейных мероприятий для детей с ограничением бюджета.",
-                        "url": "/?city=Стерлитамак&period=weekend&maximum_age_limit=6&maximum_price=1000",
-                    },
-                    {
-                        "title": "Бесплатные выставки в Уфе до конца месяца",
-                        "description": "Подборка музеев и галерей со свободным входом.",
-                        "url": "/?city=Уфа&category=exhibition&period=month&only_free=true",
-                    },
-                    {
-                        "title": "Вечерние концерты рядом с центром Уфы",
-                        "description": "Сортировка по близости площадок к центру города.",
-                        "url": "/?city=Уфа&category=concert&near_center=true",
-                    },
-                    {
-                        "title": "Мероприятия на башкирском языке",
-                        "description": "Спектакли и программы с указанием языка в метаданных.",
-                        "url": "/?language=башкирский",
-                    },
-                ),
+            context=await _build_assistant_context(
+                request=request, session_state=session_state, notice_message=notice_message
             ),
         )
+        _attach_assistant_cookies(
+            response,
+            visitor_identifier=visitor_identifier,
+            session_token=session_token,
+            set_visitor=set_visitor,
+            set_session=set_session,
+        )
+        return response
+
+    @router.post("/assistant/turn", response_class=HTMLResponse)
+    async def assistant_turn_action(request: Request, user_message: Annotated[str, Form()] = "") -> Response:
+        """Обрабатывает очередную реплику пользователя в веб-чате ИИ-ассистента."""
+        container = _require_container(request)
+        visitor_identifier, session_token, session_identifier, set_visitor, set_session = _resolve_assistant_session(
+            request
+        )
+        history_limit = max(10, container.telegram_settings.DIALOG_HISTORY_LIMIT)
+
+        rate_limiter = getattr(request.app.state, "rate_limiter", None)
+        client_address = request.client.host if request.client is not None else "unknown"
+        if isinstance(rate_limiter, InMemoryRateLimiter):
+            allowed, retry_after = rate_limiter.check_and_consume(client_address=client_address, scope="assistant")
+            if not allowed:
+                session_state = await container.dialog_repository.get_session_state(
+                    session_identifier=session_identifier,
+                    channel=DialogChannel.WEB,
+                    subscriber_identifier=visitor_identifier,
+                    message_limit=history_limit,
+                )
+                return await _render_assistant_response(
+                    request=request,
+                    templates=templates,
+                    session_state=session_state,
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    headers={"Retry-After": str(retry_after)},
+                    error_message=f"Слишком много запросов к ассистенту. Пожалуйста, подождите {retry_after} сек.",
+                    user_message_value=user_message,
+                    visitor_identifier=visitor_identifier,
+                    session_token=session_token,
+                    set_visitor=set_visitor,
+                    set_session=set_session,
+                )
+
+        cleaned_message = sanitize_control_characters(user_message, maximum_length=ASSISTANT_MAX_MESSAGE_LENGTH + 1)
+        if not cleaned_message:
+            session_state = await container.dialog_repository.get_session_state(
+                session_identifier=session_identifier,
+                channel=DialogChannel.WEB,
+                subscriber_identifier=visitor_identifier,
+                message_limit=history_limit,
+            )
+            return await _render_assistant_response(
+                request=request,
+                templates=templates,
+                session_state=session_state,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                error_message="Введите вопрос или запрос к ассистенту — сообщение не может быть пустым.",
+                user_message_value="",
+                visitor_identifier=visitor_identifier,
+                session_token=session_token,
+                set_visitor=set_visitor,
+                set_session=set_session,
+            )
+
+        if len(cleaned_message) > ASSISTANT_MAX_MESSAGE_LENGTH:
+            session_state = await container.dialog_repository.get_session_state(
+                session_identifier=session_identifier,
+                channel=DialogChannel.WEB,
+                subscriber_identifier=visitor_identifier,
+                message_limit=history_limit,
+            )
+            return await _render_assistant_response(
+                request=request,
+                templates=templates,
+                session_state=session_state,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                error_message=(
+                    f"Сообщение слишком длинное (максимум {ASSISTANT_MAX_MESSAGE_LENGTH} символов). "
+                    "Пожалуйста, сократите запрос."
+                ),
+                user_message_value=user_message,
+                visitor_identifier=visitor_identifier,
+                session_token=session_token,
+                set_visitor=set_visitor,
+                set_session=set_session,
+            )
+
+        raw_request_id = getattr(request.state, "request_identifier", None)
+        request_identifier = raw_request_id if isinstance(raw_request_id, str) else None
+        turn_result = await container.agent_dialog_service.handle_message(
+            session_identifier=session_identifier,
+            channel=DialogChannel.WEB,
+            subscriber_identifier=visitor_identifier,
+            user_message=user_message,
+            request_identifier=request_identifier,
+        )
+        session_state = await container.dialog_repository.get_session_state(
+            session_identifier=session_identifier,
+            channel=DialogChannel.WEB,
+            subscriber_identifier=visitor_identifier,
+            message_limit=history_limit,
+        )
+        return await _render_assistant_response(
+            request=request,
+            templates=templates,
+            session_state=session_state,
+            last_result=turn_result,
+            visitor_identifier=visitor_identifier,
+            session_token=session_token,
+            set_visitor=set_visitor,
+            set_session=set_session,
+        )
+
+    @router.post("/assistant/pending/{action_identifier}/confirm", response_class=HTMLResponse)
+    async def assistant_confirm_pending_action(request: Request, action_identifier: UUID) -> Response:
+        """Подтверждает отложенное изменяющее действие текущей диалоговой сессии веб-чата."""
+        return await _handle_assistant_pending_decision(
+            request=request, templates=templates, action_identifier=action_identifier, decision="confirm"
+        )
+
+    @router.post("/assistant/pending/{action_identifier}/cancel", response_class=HTMLResponse)
+    async def assistant_cancel_pending_action(request: Request, action_identifier: UUID) -> Response:
+        """Отменяет отложенное изменяющее действие текущей диалоговой сессии веб-чата."""
+        return await _handle_assistant_pending_decision(
+            request=request, templates=templates, action_identifier=action_identifier, decision="cancel"
+        )
+
+    @router.post("/assistant/reset", response_class=HTMLResponse)
+    async def assistant_reset_action(request: Request) -> Response:
+        """Начинает новый диалог веб-ассистента без сброса подписок браузерной сессии."""
+        container = _require_container(request)
+        visitor_identifier, set_visitor = _resolve_visitor_identifier(request)
+        previous_token = _read_existing_assistant_session_token(request)
+        if previous_token is not None:
+            previous_session_id = build_assistant_session_identifier(
+                visitor_identifier=visitor_identifier, session_token=previous_token
+            )
+            previous_state = await container.dialog_repository.get_session_state(
+                session_identifier=previous_session_id,
+                channel=DialogChannel.WEB,
+                subscriber_identifier=visitor_identifier,
+                message_limit=5,
+            )
+            if previous_state.active_pending_action is not None:
+                with contextlib.suppress(PendingActionNotFoundError):
+                    await container.dialog_repository.cancel_pending_action(
+                        action_identifier=previous_state.active_pending_action.action_identifier,
+                        session_identifier=previous_session_id,
+                    )
+
+        new_session_token = generate_assistant_session_token()
+        new_session_identifier = build_assistant_session_identifier(
+            visitor_identifier=visitor_identifier, session_token=new_session_token
+        )
+        history_limit = max(10, container.telegram_settings.DIALOG_HISTORY_LIMIT)
+        session_state = await container.dialog_repository.get_session_state(
+            session_identifier=new_session_identifier,
+            channel=DialogChannel.WEB,
+            subscriber_identifier=visitor_identifier,
+            message_limit=history_limit,
+        )
+
+        if request.headers.get("HX-Request") == "true":
+            return await _render_assistant_response(
+                request=request,
+                templates=templates,
+                session_state=session_state,
+                notice_message=_ASSISTANT_RESET_NOTICE,
+                visitor_identifier=visitor_identifier,
+                session_token=new_session_token,
+                set_visitor=set_visitor,
+                set_session=True,
+            )
+
+        redirect_response = RedirectResponse(url="/assistant?notice=reset", status_code=status.HTTP_303_SEE_OTHER)
+        _attach_assistant_cookies(
+            redirect_response,
+            visitor_identifier=visitor_identifier,
+            session_token=new_session_token,
+            set_visitor=set_visitor,
+            set_session=True,
+        )
+        return redirect_response
 
     @router.get("/planner", response_class=HTMLResponse)
     async def planner_page(
@@ -747,6 +966,7 @@ async def _base_page_context(*, request: Request, active_nav: str, **extra: Any)
         "source_type_labels": SOURCE_TYPE_LABELS,
         "format_price": format_price_label,
         "format_date_range": format_date_range_label,
+        "format_dialog_time": format_dialog_time_label,
         "format_status": format_status_label,
         "format_notification_time": _format_notification_time,
         "unread_subscription_count": unread_subscription_count,
@@ -979,6 +1199,167 @@ def _resolve_visitor_identifier(request: Request) -> tuple[str, bool]:
 def _attach_visitor_cookie(response: Response, *, visitor_identifier: str) -> None:
     response.set_cookie(
         key=VISITOR_COOKIE_NAME, value=visitor_identifier, max_age=60 * 60 * 24 * 180, httponly=True, samesite="lax"
+    )
+
+
+def _read_existing_assistant_session_token(request: Request) -> str | None:
+    existing_token = normalize_optional_text(request.cookies.get(ASSISTANT_SESSION_COOKIE_NAME))
+    if existing_token is not None and _ASSISTANT_SESSION_TOKEN_PATTERN.fullmatch(existing_token):
+        return existing_token
+    return None
+
+
+def _resolve_assistant_session(request: Request) -> tuple[str, str, str, bool, bool]:
+    visitor_identifier, set_visitor = _resolve_visitor_identifier(request)
+    existing_token = _read_existing_assistant_session_token(request)
+    if existing_token is not None:
+        session_token = existing_token
+        set_session = False
+    else:
+        session_token = generate_assistant_session_token()
+        set_session = True
+    session_identifier = build_assistant_session_identifier(
+        visitor_identifier=visitor_identifier, session_token=session_token
+    )
+    return visitor_identifier, session_token, session_identifier, set_visitor, set_session
+
+
+def _attach_assistant_cookies(
+    response: Response, *, visitor_identifier: str, session_token: str, set_visitor: bool, set_session: bool
+) -> None:
+    if set_visitor:
+        _attach_visitor_cookie(response, visitor_identifier=visitor_identifier)
+    if set_session:
+        response.set_cookie(
+            key=ASSISTANT_SESSION_COOKIE_NAME,
+            value=session_token,
+            max_age=60 * 60 * 24 * 30,
+            httponly=True,
+            samesite="lax",
+        )
+
+
+def _is_pending_action_error_answer(answer_text: str) -> bool:
+    return answer_text.startswith(
+        (
+            "Срок действия запроса на подтверждение истёк",
+            "Запрос на подтверждение не найден",
+            "Активный запрос на подтверждение не найден",
+            "Не удалось сохранить обращение:",
+        )
+    )
+
+
+async def _build_assistant_context(
+    *,
+    request: Request,
+    session_state: DialogSessionState,
+    last_result: AgentTurnResult | None = None,
+    error_message: str | None = None,
+    notice_message: str | None = None,
+    user_message_value: str = "",
+) -> dict[str, Any]:
+    return await _base_page_context(
+        request=request,
+        active_nav="assistant",
+        quick_scenarios=_ASSISTANT_QUICK_SCENARIOS,
+        session_state=session_state,
+        messages=session_state.recent_messages,
+        recent_messages=session_state.recent_messages,
+        active_pending_action=session_state.active_pending_action,
+        pending_action=session_state.active_pending_action,
+        last_result=last_result,
+        answer_text=last_result.answer_text if last_result is not None else None,
+        clarifying_question=last_result.clarifying_question if last_result is not None else None,
+        recommended_events=last_result.recommended_events if last_result is not None else (),
+        explanations_by_event=last_result.explanations_by_event if last_result is not None else {},
+        fallback_used=last_result.fallback_used if last_result is not None else False,
+        fallback_reason=last_result.fallback_reason if last_result is not None else None,
+        trace_identifier=last_result.trace_identifier if last_result is not None else None,
+        error_message=error_message,
+        notice_message=notice_message,
+        user_message_value=user_message_value,
+        assistant_max_message_length=ASSISTANT_MAX_MESSAGE_LENGTH,
+    )
+
+
+async def _render_assistant_response(
+    *,
+    request: Request,
+    templates: Jinja2Templates,
+    session_state: DialogSessionState,
+    visitor_identifier: str,
+    session_token: str,
+    set_visitor: bool,
+    set_session: bool,
+    last_result: AgentTurnResult | None = None,
+    error_message: str | None = None,
+    notice_message: str | None = None,
+    user_message_value: str = "",
+    status_code: int = status.HTTP_200_OK,
+    headers: Mapping[str, str] | None = None,
+) -> Response:
+    template_name = "partials/assistant_chat.html" if request.headers.get("HX-Request") == "true" else "assistant.html"
+    response = templates.TemplateResponse(
+        request=request,
+        name=template_name,
+        status_code=status_code,
+        headers=headers,
+        context=await _build_assistant_context(
+            request=request,
+            session_state=session_state,
+            last_result=last_result,
+            error_message=error_message,
+            notice_message=notice_message,
+            user_message_value=user_message_value,
+        ),
+    )
+    _attach_assistant_cookies(
+        response,
+        visitor_identifier=visitor_identifier,
+        session_token=session_token,
+        set_visitor=set_visitor,
+        set_session=set_session,
+    )
+    return response
+
+
+async def _handle_assistant_pending_decision(
+    *, request: Request, templates: Jinja2Templates, action_identifier: UUID, decision: Literal["confirm", "cancel"]
+) -> Response:
+    container = _require_container(request)
+    visitor_identifier, session_token, session_identifier, set_visitor, set_session = _resolve_assistant_session(
+        request
+    )
+    raw_request_id = getattr(request.state, "request_identifier", None)
+    request_identifier = raw_request_id if isinstance(raw_request_id, str) else None
+
+    turn_result = await container.agent_dialog_service.resolve_pending_action(
+        action_identifier=action_identifier,
+        session_identifier=session_identifier,
+        channel=DialogChannel.WEB,
+        subscriber_identifier=visitor_identifier,
+        decision=decision,
+        request_identifier=request_identifier,
+    )
+    history_limit = max(10, container.telegram_settings.DIALOG_HISTORY_LIMIT)
+    session_state = await container.dialog_repository.get_session_state(
+        session_identifier=session_identifier,
+        channel=DialogChannel.WEB,
+        subscriber_identifier=visitor_identifier,
+        message_limit=history_limit,
+    )
+    error_message = turn_result.answer_text if _is_pending_action_error_answer(turn_result.answer_text) else None
+    return await _render_assistant_response(
+        request=request,
+        templates=templates,
+        session_state=session_state,
+        last_result=turn_result,
+        error_message=error_message,
+        visitor_identifier=visitor_identifier,
+        session_token=session_token,
+        set_visitor=set_visitor,
+        set_session=set_session,
     )
 
 
