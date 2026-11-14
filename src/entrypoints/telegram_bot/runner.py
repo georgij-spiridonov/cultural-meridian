@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import inspect
 import signal
 import threading
 from collections.abc import Callable
@@ -102,14 +103,24 @@ async def run_telegram_bot(
             await bot.set_my_commands(list(build_bot_commands()))
             logger.info("Команды Telegram-бота зарегистрированы; запуск long polling.")
             stop_watcher = asyncio.create_task(_watch_stop_event(effective_stop_event, dispatcher))
+            notification_task = asyncio.create_task(
+                _run_subscription_notification_loop(
+                    container=resolved_container,
+                    stop_event=effective_stop_event,
+                    poll_interval_seconds=resolved_container.telegram_settings.NOTIFICATION_POLL_INTERVAL_SECONDS,
+                )
+            )
             try:
                 await dispatcher.start_polling(
                     bot, allowed_updates=dispatcher.resolve_used_update_types(), handle_signals=False
                 )
             finally:
                 stop_watcher.cancel()
+                notification_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await stop_watcher
+                with contextlib.suppress(asyncio.CancelledError):
+                    await notification_task
         finally:
             await bot.session.close()
     finally:
@@ -121,6 +132,37 @@ async def run_telegram_bot(
 async def _watch_stop_event(stop_event: asyncio.Event, dispatcher: Dispatcher) -> None:
     await stop_event.wait()
     await dispatcher.stop_polling()
+
+
+async def _run_subscription_notification_loop(
+    *, container: ApplicationContainer, stop_event: asyncio.Event, poll_interval_seconds: float
+) -> None:
+    """Периодически опрашивает и отправляет ожидающие Telegram-уведомления по подпискам."""
+    effective_interval = max(0.05, float(poll_interval_seconds))
+    while not stop_event.is_set():
+        subscription_service = getattr(container, "subscription_service", None)
+        dispatch_method = getattr(subscription_service, "dispatch_pending_telegram_notifications", None)
+        if callable(dispatch_method):
+            try:
+                maybe_awaitable = dispatch_method()
+                if inspect.isawaitable(maybe_awaitable):
+                    report = await maybe_awaitable
+                    if getattr(report, "attempted_count", 0) > 0:
+                        logger.info(
+                            "Фоновая отправка Telegram-уведомлений: attempted=%s, sent=%s, deferred=%s, failed=%s.",
+                            report.attempted_count,
+                            report.sent_count,
+                            report.deferred_count,
+                            report.failed_count,
+                        )
+            except Exception as error:
+                logger.warning("Ошибка фонового цикла отправки Telegram-уведомлений: %s", error)
+
+        if stop_event.is_set():
+            break
+
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=effective_interval)
 
 
 def _install_stop_signal_handlers(stop_event: asyncio.Event) -> Callable[[], None]:
