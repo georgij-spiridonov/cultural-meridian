@@ -40,4 +40,4 @@
 ## 4:15 – 5:00 | Встраивание в сайт Министерства, API и метрики качества
 1. Открыть конструктор виджета: `http://localhost:8000/widget/demo` — показать готовый `<iframe>` и `<script src=".../widget.js">` на Shadow DOM без сторонних cookies.
 2. Показать Swagger UI: `http://localhost:8000/docs` и метрики `/metrics`.
-3. Показать воспроизводимый отчёт оценки качества `evaluation/reports/baseline_offline_report.md` (80 запросов: 70 `golden` + 10 `holdout`, `Worst-of-two`, `Baseline`, `0` галлюцинаций, `0` утечек отмен, `100%` защита от инъекций) и точечный live-замер на OpenRouter (`1.09 ₽`/ход, `4.22 с` p95).
+3. Показать воспроизводимый отчёт оценки качества `evaluation/reports/baseline_offline_report.md` (80 запросов: 70 `golden` + 10 `holdout`, `Worst-of-two`, `Baseline`, `0` галлюцинаций, `0` утечек отмен, `100%` защита от инъекций) и живой отчёт `evaluation/reports/baseline_live_report.md` на 10 запросах OpenRouter (`90.0%` pass rate, `1.11 ₽`/ход, `4.03 с` p50, `0` галлюцинаций).
