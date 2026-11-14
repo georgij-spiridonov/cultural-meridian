@@ -16,12 +16,14 @@ from src.application import (
 from src.core.configuration import (
     ApplicationSettings,
     DatabaseSettings,
+    GeolocationSettings,
     LanguageModelSettings,
     LoggingSettings,
     TelegramSettings,
     WebSettings,
     get_application_settings,
     get_database_settings,
+    get_geolocation_settings,
     get_language_model_settings,
     get_logging_settings,
     get_telegram_settings,
@@ -35,6 +37,7 @@ from src.infrastructure.database import (
     PostgreSqlEventRepository,
     PostgreSqlRawEventRepository,
 )
+from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor, create_openai_client
 
 __all__ = ["ApplicationContainer", "build_application_container"]
@@ -67,6 +70,8 @@ class ApplicationContainer:
         weekend_planner: Прикладной планировщик маршрута «Выходной день».
         fallback_search: Детерминированный резервный поиск без языковой модели.
         agent_dialog_service: Оркестратор многошагового диалога с ИИ-агентом и фоллбэком.
+        geolocation_settings: Настройки геолокации, справочника координат и оценки переездов.
+        geolocation_resolver: Гибридный адаптер геокодирования и расчёта времени в пути.
     """
 
     application_settings: ApplicationSettings
@@ -89,6 +94,8 @@ class ApplicationContainer:
     weekend_planner: WeekendPlannerService
     fallback_search: FallbackSearchService
     agent_dialog_service: AgentDialogService
+    geolocation_settings: GeolocationSettings = field(default_factory=get_geolocation_settings)
+    geolocation_resolver: HybridGeolocationResolver | None = None
     _openai_client: AsyncOpenAI | None = field(default=None, repr=False)
 
     async def startup(self) -> None:
@@ -98,7 +105,9 @@ class ApplicationContainer:
         logger.info("Контейнер зависимостей приложения запущен.")
 
     async def shutdown(self) -> None:
-        """Корректно закрывает подключения к базе данных, LLM-клиенту и освобождает ресурсы."""
+        """Корректно закрывает подключения к базе данных, геокодеру, LLM-клиенту и освобождает ресурсы."""
+        if self.geolocation_resolver is not None:
+            await self.geolocation_resolver.close()
         if self._openai_client is not None:
             await self._openai_client.close()
         await self.database_engine_manager.close()
@@ -113,6 +122,7 @@ def build_application_container(
     web_settings: WebSettings | None = None,
     telegram_settings: TelegramSettings | None = None,
     language_model_settings: LanguageModelSettings | None = None,
+    geolocation_settings: GeolocationSettings | None = None,
 ) -> ApplicationContainer:
     """Собирает граф зависимостей приложения поверх настроек окружения.
 
@@ -123,6 +133,7 @@ def build_application_container(
         web_settings: Явная переопределённая конфигурация веб-интерфейса.
         telegram_settings: Явная переопределённая конфигурация Telegram-бота.
         language_model_settings: Явная переопределённая конфигурация языковой модели.
+        geolocation_settings: Явная переопределённая конфигурация геолокации.
 
     Returns:
         Полностью настроенный экземпляр `ApplicationContainer`.
@@ -133,6 +144,7 @@ def build_application_container(
     resolved_web_settings = web_settings or get_web_settings()
     resolved_telegram_settings = telegram_settings or get_telegram_settings()
     resolved_language_model_settings = language_model_settings or get_language_model_settings()
+    resolved_geolocation_settings = geolocation_settings or get_geolocation_settings()
 
     engine_manager = DatabaseEngineManager(resolved_database_settings)
 
@@ -153,6 +165,10 @@ def build_application_container(
         settings=resolved_language_model_settings, openai_client=openai_client
     )
 
+    geolocation_resolver = HybridGeolocationResolver(
+        settings=resolved_geolocation_settings, event_repository=event_repository
+    )
+
     search_service = EventSearchService(event_repository=event_repository)
     import_service = EventImportService(
         event_repository=event_repository, administration_repository=administration_repository
@@ -163,7 +179,9 @@ def build_application_container(
     administration_service = AdministrationService(
         event_repository=event_repository, administration_repository=administration_repository
     )
-    weekend_planner = WeekendPlannerService(event_repository=event_repository)
+    weekend_planner = WeekendPlannerService(
+        event_repository=event_repository, geolocation_resolver=geolocation_resolver
+    )
     fallback_search = FallbackSearchService(event_repository=event_repository, weekend_planner=weekend_planner)
     agent_dialog_service = AgentDialogService(
         event_repository=event_repository,
@@ -200,5 +218,7 @@ def build_application_container(
         weekend_planner=weekend_planner,
         fallback_search=fallback_search,
         agent_dialog_service=agent_dialog_service,
+        geolocation_settings=resolved_geolocation_settings,
+        geolocation_resolver=geolocation_resolver,
         _openai_client=openai_client,
     )
