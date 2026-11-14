@@ -68,7 +68,8 @@ class MenuCallback(CallbackData, prefix="m"):
     """Навигационные действия главного меню и разделов бота.
 
     Attributes:
-        action_name: Код целевого раздела (`home`, `cities`, `categories`, `subscriptions`, `help`, `reset`).
+        action_name: Код целевого раздела (`home`, `cities`, `categories`, `subscriptions`, `planner`, `help`, `reset`,
+            `reset_dialog`).
     """
 
     action_name: str
@@ -238,8 +239,9 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🎭 Категории", callback_data=MenuCallback(action_name="categories"))
     builder.button(text="🗓 Выходной день", callback_data=MenuCallback(action_name="planner"))
     builder.button(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions"))
+    builder.button(text="🔄 Новый диалог", callback_data=MenuCallback(action_name="reset_dialog"))
     builder.button(text="❓ Помощь", callback_data=MenuCallback(action_name="help"))
-    builder.adjust(2, 2, 2, 1, 2)
+    builder.adjust(2, 2, 2, 2, 2)
     return builder.as_markup()
 
 
@@ -427,10 +429,13 @@ def build_agent_turn_keyboard(turn_result: AgentTurnResult, *, public_web_base_u
         InlineKeyboardButton(text="🏙 Город", callback_data=MenuCallback(action_name="cities").pack()),
         InlineKeyboardButton(text="🎭 Категория", callback_data=MenuCallback(action_name="categories").pack()),
     )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Новый диалог", callback_data=MenuCallback(action_name="reset_dialog").pack()),
+        InlineKeyboardButton(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions").pack()),
+    )
 
     footer_buttons: list[InlineKeyboardButton] = [
-        InlineKeyboardButton(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions").pack()),
-        InlineKeyboardButton(text="🏠 Меню", callback_data=MenuCallback(action_name="home").pack()),
+        InlineKeyboardButton(text="🏠 Главное меню", callback_data=MenuCallback(action_name="home").pack())
     ]
     clean_web_url = sanitize_public_url(public_web_base_url)
     if clean_web_url is not None:

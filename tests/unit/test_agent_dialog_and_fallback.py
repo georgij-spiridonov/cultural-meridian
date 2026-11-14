@@ -140,6 +140,11 @@ class _InMemoryDialogRepositoryStub:
             raise PendingActionNotFoundError("Не найдено", action_identifier=action_identifier)
         self.pending_by_session.pop(session_identifier, None)
 
+    async def reset_session_history(self, *, session_identifier: str) -> bool:
+        had_messages = bool(self.messages_by_session.pop(session_identifier, None))
+        had_pending = self.pending_by_session.pop(session_identifier, None) is not None
+        return had_messages or had_pending
+
     async def save_trace(self, *, trace: AgentTraceRecord) -> None:
         self.traces.append(trace)
 

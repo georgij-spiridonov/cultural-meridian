@@ -453,6 +453,28 @@ async def test_dialog_repository_memory_pending_actions_traces_and_budget(
     assert budget.user_daily_spent_rubles == pytest.approx(3.5)
     assert budget.is_budget_exceeded is True
 
+    # Сброс истории очищает реплики и активное pending-действие, не удаляя трассы и сессию
+    pending_before_reset = PendingAction(
+        action_identifier=uuid4(),
+        session_identifier="sess-test-1",
+        channel=DialogChannel.WEB,
+        action_type="subscribe",
+        payload={"city": "Уфа", "category": None},
+        confirmation_prompt="Подтвердить подписку на Уфу?",
+        created_at=base_time + timedelta(minutes=11),
+        expires_at=base_time + timedelta(minutes=25),
+    )
+    await dialog_repository.create_pending_action(pending_action=pending_before_reset)
+    was_reset = await dialog_repository.reset_session_history(session_identifier="sess-test-1")
+    assert was_reset is True
+    cleared_state = await dialog_repository.get_session_state(
+        session_identifier="sess-test-1", channel=DialogChannel.WEB, subscriber_identifier="web-user-1", message_limit=5
+    )
+    assert cleared_state.recent_messages == ()
+    assert cleared_state.active_pending_action is None
+    assert await dialog_repository.get_trace(trace_identifier=trace.trace_identifier) is not None
+    assert await dialog_repository.reset_session_history(session_identifier="sess-test-1") is False
+
 
 async def test_administration_repository_subscriptions_feedback_moderation_and_audit(
     administration_repository: PostgreSqlAdministrationRepository, event_repository: PostgreSqlEventRepository

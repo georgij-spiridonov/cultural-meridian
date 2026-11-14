@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import selectinload
 
@@ -312,6 +312,59 @@ class PostgreSqlDialogRepository(DialogRepositoryPort):
                     action_identifier=action_identifier,
                     session_identifier=cleaned_session_id,
                 )
+
+    async def reset_session_history(self, *, session_identifier: str) -> bool:
+        """Очищает историю сообщений сессии и отменяет активное ожидающее действие.
+
+        Не затрагивает сохранённые трассы ответов (`agent_traces`), лимиты расходов и подписки.
+
+        Arguments:
+            session_identifier: Стабильный идентификатор диалоговой сессии.
+
+        Returns:
+            `True`, если были удалены реплики или отменено активное подтверждение.
+        """
+        cleaned_session_id = session_identifier.strip()
+        if not cleaned_session_id:
+            raise ValidationException("Идентификатор сессии не может быть пустым.")
+
+        async with (
+            handle_database_errors(operation="сброс истории диалоговой сессии"),
+            self._engine_manager.session() as session,
+            session.begin(),
+        ):
+            deleted_message_ids = (
+                (
+                    await session.execute(
+                        delete(DialogMessageRow)
+                        .where(DialogMessageRow.session_identifier == cleaned_session_id)
+                        .returning(DialogMessageRow.identifier)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            canceled_action_ids = (
+                (
+                    await session.execute(
+                        update(PendingActionRow)
+                        .where(
+                            (PendingActionRow.session_identifier == cleaned_session_id)
+                            & (PendingActionRow.status == "pending")
+                        )
+                        .values(status="canceled")
+                        .returning(PendingActionRow.action_identifier)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await session.execute(
+                update(DialogSessionRow)
+                .where(DialogSessionRow.session_identifier == cleaned_session_id)
+                .values(updated_at=func.now())
+            )
+            return bool(deleted_message_ids or canceled_action_ids)
 
     async def save_trace(self, *, trace: AgentTraceRecord) -> AgentTraceRecord:
         """Сохраняет полную трассу ответа ИИ-агента или резервного поиска.

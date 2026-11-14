@@ -37,7 +37,12 @@ from src.domain.services import BASHKORTOSTAN_TIMEZONE
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.command_line.seed import DEFAULT_VENUES_CATALOG_PATH, seed_reference_catalog
 from src.entrypoints.telegram_bot.handlers import create_telegram_router
-from src.entrypoints.telegram_bot.keyboards import EventCardCallback, SubscriptionCallback, compute_city_token
+from src.entrypoints.telegram_bot.keyboards import (
+    EventCardCallback,
+    MenuCallback,
+    SubscriptionCallback,
+    compute_city_token,
+)
 from src.infrastructure.database import (
     DatabaseEngineManager,
     PostgreSqlAdministrationRepository,
@@ -315,10 +320,45 @@ async def test_telegram_bot_end_to_end_with_postgresql(telegram_container: Appli
     assert len(subscriptions) == 1
     assert subscriptions[0].city == "Уфа"
 
+    # Сброс истории диалога кнопкой очищает реплики в PostgreSQL, сохраняя подписку пользователя
     await dispatcher.feed_update(
         bot,
         Update(
             update_id=4,
+            callback_query=CallbackQuery(
+                id="pg-cb-reset-dialog",
+                from_user=User(id=user_identifier, is_bot=False, first_name="Айрат"),
+                chat_instance="chat-pg",
+                message=Message(
+                    message_id=502,
+                    date=datetime.now(tz=BASHKORTOSTAN_TIMEZONE),
+                    chat=Chat(id=user_identifier, type="private"),
+                    from_user=User(id=888888, is_bot=True, first_name="CulturalMeridianBot"),
+                    text="Меню",
+                ),
+                data=MenuCallback(action_name="reset_dialog").pack(),
+            ),
+        ),
+    )
+    reset_state = await telegram_container.dialog_repository.get_session_state(
+        session_identifier=f"telegram:{user_identifier}",
+        channel=DialogChannel.TELEGRAM,
+        subscriber_identifier=str(user_identifier),
+    )
+    assert reset_state.recent_messages == ()
+    assert (
+        len(
+            await telegram_container.subscription_service.list_subscriptions(
+                channel=DialogChannel.TELEGRAM, subscriber_identifier=str(user_identifier)
+            )
+        )
+        == 1
+    )
+
+    await dispatcher.feed_update(
+        bot,
+        Update(
+            update_id=5,
             message=Message(
                 message_id=2,
                 date=datetime.now(tz=BASHKORTOSTAN_TIMEZONE),
@@ -341,7 +381,7 @@ async def test_telegram_bot_end_to_end_with_postgresql(telegram_container: Appli
     await dispatcher.feed_update(
         bot,
         Update(
-            update_id=5,
+            update_id=6,
             callback_query=CallbackQuery(
                 id="pg-cb-confirm-unsub",
                 from_user=User(id=user_identifier, is_bot=False, first_name="Айрат"),

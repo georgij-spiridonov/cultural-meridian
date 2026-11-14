@@ -96,6 +96,23 @@ class DialogRepositoryPort(Protocol):
         """
         ...
 
+    async def reset_session_history(self, *, session_identifier: str) -> bool:
+        """Очищает историю сообщений сессии и отменяет активное ожидающее действие.
+
+        Не затрагивает сохранённые трассы ответов, лимиты расходов и подписки пользователя.
+
+        Arguments:
+            session_identifier: Стабильный идентификатор диалоговой сессии.
+
+        Returns:
+            `True`, если были удалены реплики диалога или отменено активное подтверждение.
+
+        Raises:
+            InfrastructureException: При ошибке обновления состояния сессии в хранилище.
+            ValidationException: Если идентификатор сессии пуст.
+        """
+        ...
+
     async def save_trace(self, *, trace: AgentTraceRecord) -> AgentTraceRecord:
         """Сохраняет полную трассу ответа ИИ-агента или резервного поиска.
 
