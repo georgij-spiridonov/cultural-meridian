@@ -503,6 +503,7 @@ class IngestionSettings(BaseSettings):
         USER_AGENT: Заголовок `User-Agent` для запросов фонового сборщика и проверщика ссылок.
         MAX_CONCURRENT_REQUESTS_PER_HOST: Максимальное число одновременных HTTP-запросов к одному сайту.
         REQUEST_DELAY_SECONDS: Пауза между началами HTTP-запросов к одному сайту в секундах.
+        ENABLE_EXTERNAL_SOURCES: Признак опроса внешних HTTP(S)-источников при плановом сборе.
     """
 
     model_config = SettingsConfigDict(
@@ -526,6 +527,7 @@ class IngestionSettings(BaseSettings):
     USER_AGENT: str = "cultural-meridian-bot/1.0 (+https://cultural-meridian.local)"
     MAX_CONCURRENT_REQUESTS_PER_HOST: int = Field(default=2, ge=1, le=10)
     REQUEST_DELAY_SECONDS: float = Field(default=1.0, ge=0.0, le=60.0)
+    ENABLE_EXTERNAL_SOURCES: bool = False
 
     @field_validator("SOURCES_CONFIG_PATH", "LOCAL_FEEDS_DIRECTORY", mode="after")
     @classmethod

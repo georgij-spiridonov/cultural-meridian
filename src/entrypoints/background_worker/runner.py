@@ -25,6 +25,7 @@ from src.domain.entities import IngestionReport, NotificationDispatchReport
 from src.domain.ports import RawNormalizationStatus
 from src.entrypoints.bootstrap import ApplicationContainer, build_application_container
 from src.infrastructure.sources import load_sources_registry
+from src.infrastructure.sources.registry import is_http_url
 
 __all__ = ["BackgroundWorkerRunner", "build_argument_parser", "main", "run_background_worker"]
 
@@ -122,6 +123,8 @@ class BackgroundWorkerRunner:
         ingestion_service = self._require_ingestion_service()
         if source_name is None:
             sources = load_sources_registry(self._sources_config_path, only_enabled=True)
+            if not self._container.ingestion_settings.ENABLE_EXTERNAL_SOURCES:
+                sources = tuple(source for source in sources if not is_http_url(source.source_url))
         else:
             sources = tuple(
                 replace(source, is_enabled=True)
