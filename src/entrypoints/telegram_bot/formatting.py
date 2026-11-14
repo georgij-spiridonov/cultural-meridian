@@ -36,6 +36,7 @@ __all__ = [
     "format_event_card_message",
     "format_events_page_message",
     "format_help_message",
+    "format_reset_dialog_message",
     "format_similar_events_message",
     "format_start_message",
     "format_subscription_label",
@@ -141,6 +142,7 @@ def format_help_message() -> str:
         "• /plan — планировщик маршрута «Выходной день» (например: <code>/plan Уфа 2000</code>)\n"
         "• /subscribe — подписка на уведомления по городу и категории\n"
         "• /unsubscribe — просмотр и удаление подписок\n"
+        "• /reset — начать новый диалог (сбросить историю сообщений)\n"
         "• /cancel — отмена текущего шага или подтверждения\n"
         "• /help — эта справка\n\n"
         "<b>Поиск текстом:</b>\n"
@@ -166,6 +168,15 @@ def format_cancel_message(*, had_pending_action: bool) -> str:
             "Можете начать новый поиск или выбрать раздел в меню."
         )
     return "Текущий шаг сброшен. Выберите фильтр или напишите новый поисковый запрос."
+
+
+def format_reset_dialog_message() -> str:
+    """Формирует сообщение об успешном сбросе истории диалога по аналогии с веб-версией."""
+    return (
+        "🔄 <b>Начат новый диалог.</b>\n\n"
+        "История сообщений очищена, а ваши подписки и настройки сохранены.\n"
+        "Задайте новый вопрос текстом или выберите фильтр кнопками ниже."
+    )
 
 
 def format_active_filter_summary(search_filter: EventSearchFilter) -> str:

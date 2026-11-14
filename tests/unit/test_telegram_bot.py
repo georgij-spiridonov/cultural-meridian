@@ -80,6 +80,7 @@ from src.entrypoints.telegram_bot.keyboards import (
     SimilarEventsCallback,
     SubscriptionCallback,
     WeekendPlanCallback,
+    build_agent_turn_keyboard,
     build_categories_keyboard,
     build_cities_keyboard,
     build_empty_search_keyboard,
@@ -466,6 +467,20 @@ class _DialogRepositoryStub:
         del self.pending_actions[action_identifier]
         self.canceled_actions.add(action_identifier)
 
+    async def reset_session_history(self, *, session_identifier: str) -> bool:
+        """Очищает историю сообщений сессии и отменяет активное ожидающее действие."""
+        had_messages = bool(self.messages.get(session_identifier))
+        self.messages[session_identifier] = []
+        active_identifiers = [
+            identifier
+            for identifier, action in self.pending_actions.items()
+            if action.session_identifier == session_identifier
+        ]
+        for identifier in active_identifiers:
+            del self.pending_actions[identifier]
+            self.canceled_actions.add(identifier)
+        return had_messages or bool(active_identifiers)
+
     async def save_trace(self, *, trace: AgentTraceRecord) -> AgentTraceRecord:
         """Заглушка сохранения трассы."""
         return trace
@@ -803,9 +818,13 @@ def test_keyboards_callback_data_within_64_bytes_and_optional_web_urls() -> None
         build_similar_events_keyboard(events[:3], source_event_identifier=events[0].identifier),
         build_subscriptions_keyboard(subscriptions),
         build_pending_action_keyboard(uuid4()),
+        build_agent_turn_keyboard(AgentTurnResult(answer_text="Подборка", recommended_events=events[:2])),
     ]
     for markup in markups:
         _assert_all_callback_data_within_limit(markup)
+
+    main_callbacks = _assert_all_callback_data_within_limit(build_main_menu_keyboard())
+    assert MenuCallback(action_name="reset_dialog").pack() in main_callbacks
 
     card_without_web = build_event_card_keyboard(events[0], public_web_base_url="")
     card_urls_without_web = [button.url for row in card_without_web.inline_keyboard for button in row if button.url]
@@ -1886,3 +1905,80 @@ async def test_handlers_ai_pending_action_confirm_via_callback() -> None:
     )
     assert len(fb_admin_repo.feedback_requests) == 1
     assert "Уточните время начала спектакля" in fb_admin_repo.feedback_requests[0].message_text
+
+
+async def test_handlers_reset_dialog_via_button_and_command_preserves_subscriptions() -> None:
+    """Проверяет сброс истории диалога кнопкой «🔄 Новый диалог» и командой `/reset` с сохранением подписок."""
+    concert = _build_test_event(title="Осенний джаз в Уфе", city="Уфа")
+    orchestrator = _TelegramAgentOrchestratorStub(event_by_turn=[concert, concert, concert])
+    dispatcher, bot, fake_session, admin_repo, dialog_repository, _ = _build_ai_bot_test_context(
+        events=[concert], orchestrator=orchestrator
+    )
+
+    user_identifier = 9301
+    subscription_record = SubscriptionRecord(
+        subscription_identifier=uuid4(),
+        channel=DialogChannel.TELEGRAM,
+        subscriber_identifier=str(user_identifier),
+        city="Уфа",
+        category=EventCategory.CONCERT,
+        created_at=datetime.now(tz=BASHKORTOSTAN_TIMEZONE),
+    )
+    admin_repo.subscriptions[subscription_record.subscription_identifier] = subscription_record
+
+    # 1. Первый ход: ответ ИИ содержит кнопку сброса истории диалога
+    await dispatcher.feed_update(
+        bot,
+        _make_text_update(
+            update_identifier=1, message_identifier=1, user_identifier=user_identifier, text="Концерты в Уфе"
+        ),
+    )
+    first_reply = fake_session.requests[-1]
+    assert isinstance(first_reply, SendMessage)
+    assert isinstance(first_reply.reply_markup, InlineKeyboardMarkup)
+    reset_callback_data = MenuCallback(action_name="reset_dialog").pack()
+    assert any(
+        button.callback_data == reset_callback_data
+        for row in first_reply.reply_markup.inline_keyboard
+        for button in row
+    )
+    assert len(dialog_repository.messages[f"telegram:{user_identifier}"]) == 2
+
+    # 2. Нажатие на кнопку «🔄 Новый диалог» сбрасывает историю и возвращает главное меню
+    await dispatcher.feed_update(
+        bot,
+        _make_callback_update(
+            update_identifier=2,
+            callback_identifier="cb-reset-dialog",
+            message_identifier=101,
+            user_identifier=user_identifier,
+            callback_data=reset_callback_data,
+        ),
+    )
+    reset_reply = fake_session.requests[-2]
+    assert isinstance(reset_reply, EditMessageText)
+    assert reset_reply.text is not None
+    assert "Начат новый диалог" in reset_reply.text
+    assert dialog_repository.messages[f"telegram:{user_identifier}"] == []
+    assert subscription_record.subscription_identifier in admin_repo.subscriptions
+
+    # 3. Следующий ход получает пустую историю диалога
+    await dispatcher.feed_update(
+        bot,
+        _make_text_update(
+            update_identifier=3, message_identifier=2, user_identifier=user_identifier, text="А на выходные?"
+        ),
+    )
+    assert orchestrator.received_histories[1] == ()
+    assert len(dialog_repository.messages[f"telegram:{user_identifier}"]) == 2
+
+    # 4. Повторный сброс через команду `/reset`
+    await dispatcher.feed_update(
+        bot,
+        _make_text_update(update_identifier=4, message_identifier=3, user_identifier=user_identifier, text="/reset"),
+    )
+    command_reply = fake_session.requests[-1]
+    assert isinstance(command_reply, SendMessage)
+    assert "Начат новый диалог" in command_reply.text
+    assert dialog_repository.messages[f"telegram:{user_identifier}"] == []
+    assert subscription_record.subscription_identifier in admin_repo.subscriptions

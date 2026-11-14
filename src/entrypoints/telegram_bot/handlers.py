@@ -65,6 +65,7 @@ from src.entrypoints.telegram_bot.formatting import (
     format_event_card_message,
     format_events_page_message,
     format_help_message,
+    format_reset_dialog_message,
     format_similar_events_message,
     format_start_message,
     format_subscriptions_message,
@@ -356,6 +357,15 @@ def create_telegram_router(
     async def handle_help_command(message: Message) -> None:
         """Обрабатывает команду `/help`: выводит краткую справку по командам и поиску."""
         await message.answer(format_help_message(), reply_markup=build_main_menu_keyboard())
+
+    @router.message(Command("reset"))
+    async def handle_reset_command(message: Message) -> None:
+        """Обрабатывает команду `/reset`: очищает историю диалога, сохраняя подписки пользователя."""
+        if message.from_user is None:
+            return
+        session_identifier = _build_session_identifier(message.from_user.id)
+        await _reset_dialog_session(dependencies=dependencies, session_identifier=session_identifier)
+        await message.answer(format_reset_dialog_message(), reply_markup=build_main_menu_keyboard())
 
     @router.message(Command("cancel"))
     async def handle_cancel_command(message: Message) -> None:
@@ -657,6 +667,11 @@ def create_telegram_router(
                 subscriber_identifier=subscriber_identifier,
                 search_filter=reset_filter,
                 edit_existing=True,
+            )
+        elif action_name == "reset_dialog":
+            await _reset_dialog_session(dependencies=dependencies, session_identifier=session_identifier)
+            await _safe_edit_or_send(
+                callback_query.message, text=format_reset_dialog_message(), reply_markup=build_main_menu_keyboard()
             )
 
         await _safe_answer_callback(callback_query)
@@ -1171,6 +1186,13 @@ def create_telegram_router(
         await _safe_answer_callback(callback_query)
 
     return router
+
+
+async def _reset_dialog_session(*, dependencies: TelegramBotDependencies, session_identifier: str) -> bool:
+    """Сбрасывает историю сообщений диалога, активное подтверждение и кэшированные шаги сессии."""
+    dependencies.filter_store.reset_session(session_identifier)
+    dependencies.plan_store.reset_session(session_identifier)
+    return await dependencies.dialog_repository.reset_session_history(session_identifier=session_identifier)
 
 
 async def _render_agent_turn_result(

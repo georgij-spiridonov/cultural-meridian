@@ -28,6 +28,7 @@ _BOT_COMMANDS: Final[tuple[BotCommand, ...]] = (
     BotCommand(command="plan", description="Планировщик маршрута «Выходной день»"),
     BotCommand(command="subscribe", description="Подписка на город и категорию"),
     BotCommand(command="unsubscribe", description="Управление и удаление подписок"),
+    BotCommand(command="reset", description="Начать новый диалог (сбросить историю)"),
     BotCommand(command="cancel", description="Сбросить шаг или отменить подтверждение"),
 )
 
