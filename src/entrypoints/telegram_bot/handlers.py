@@ -2,7 +2,6 @@
 
 import contextlib
 import hashlib
-import inspect
 import re
 import time
 from collections import OrderedDict
@@ -11,8 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
 from difflib import SequenceMatcher
-from typing import Any, Final, Literal, cast, override
-from unittest.mock import AsyncMock
+from typing import Any, Final, Literal, override
 from uuid import UUID, uuid4
 
 from aiogram import BaseMiddleware, F, Router
@@ -1355,13 +1353,8 @@ async def _safe_edit_or_send(message: Message, *, text: str, reply_markup: Inlin
 
 def _resolve_weekend_planner(container: ApplicationContainer) -> WeekendPlannerService | None:
     candidate = getattr(container, "weekend_planner", None)
-    if candidate is None:
-        return None
-    plan_method = getattr(candidate, "plan_weekend", None)
-    if plan_method is None:
-        return None
-    if inspect.iscoroutinefunction(plan_method) or isinstance(plan_method, AsyncMock):
-        return cast(WeekendPlannerService, candidate)
+    if isinstance(candidate, WeekendPlannerService):
+        return candidate
     return None
 
 
