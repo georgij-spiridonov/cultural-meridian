@@ -6,6 +6,7 @@ import contextlib
 import signal
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import FrameType
@@ -13,7 +14,12 @@ from typing import Any
 from uuid import uuid4
 
 from src.application.event_ingestion import EventIngestionService
-from src.core.exceptions import ApplicationException, LifecycleClientNotInitializedError, ValidationException
+from src.core.exceptions import (
+    ApplicationException,
+    LifecycleClientNotInitializedError,
+    ValidationException,
+    ValidationInputError,
+)
 from src.core.logger import get_logger, reset_request_identifier, set_request_identifier
 from src.domain.entities import IngestionReport, NotificationDispatchReport
 from src.domain.ports import RawNormalizationStatus
@@ -91,7 +97,12 @@ class BackgroundWorkerRunner:
         return service
 
     async def run_once(
-        self, *, reprocess: bool = False, verify_links: bool = False, current_time: datetime | None = None
+        self,
+        *,
+        reprocess: bool = False,
+        verify_links: bool = False,
+        current_time: datetime | None = None,
+        source_name: str | None = None,
     ) -> IngestionReport:
         """Выполняет один полный цикл опроса активных источников и дополнительных проверок.
 
@@ -99,15 +110,26 @@ class BackgroundWorkerRunner:
             reprocess: Принудительно запустить переигрывание сырых записей `pending` и `failed`.
             verify_links: Принудительно запустить проверку доступности ссылок опубликованных событий.
             current_time: Необязательная опорная метка времени для детерминированных тестов и прогонов.
+            source_name: Имя одного источника из реестра; он опрашивается, даже если выключен.
 
         Returns:
             Сводный отчёт `IngestionReport` по итогам опроса активных источников.
 
         Raises:
+            ValidationInputError: Если источник с именем `source_name` не найден в реестре.
             ApplicationException: При сбое инициализации, чтения реестра источников или критической ошибке сервиса.
         """
         ingestion_service = self._require_ingestion_service()
-        sources = load_sources_registry(self._sources_config_path, only_enabled=True)
+        if source_name is None:
+            sources = load_sources_registry(self._sources_config_path, only_enabled=True)
+        else:
+            sources = tuple(
+                replace(source, is_enabled=True)
+                for source in load_sources_registry(self._sources_config_path)
+                if source.name == source_name
+            )
+            if not sources:
+                raise ValidationInputError(f"Источник '{source_name}' не найден в реестре источников.")
         sources_by_name = {source.name: source for source in sources}
 
         report = await ingestion_service.ingest_sources(sources=sources, current_time=current_time)
@@ -227,6 +249,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Дополнительно проверить доступность ссылок ранее опубликованных мероприятий.",
     )
+    parser.add_argument(
+        "--source", default=None, help="Опросить только один источник из реестра (имеет смысл вместе с --once)."
+    )
     return parser
 
 
@@ -238,6 +263,7 @@ async def run_background_worker(
     reprocess: bool = False,
     verify_links: bool = False,
     manage_lifecycle: bool = True,
+    source_name: str | None = None,
 ) -> int:
     """Инициализирует жизненный цикл контейнера, обрабатывает сигналы и запускает воркер.
 
@@ -248,6 +274,7 @@ async def run_background_worker(
         reprocess: Переигрывать ли сырые записи в статусах `pending` и `failed`.
         verify_links: Проверять ли доступность ссылок опубликованных карточек.
         manage_lifecycle: Вызывать ли `startup()` и `shutdown()` у контейнера зависимостей.
+        source_name: Имя одного источника для однократного прогона; без `once` игнорируется с предупреждением.
 
     Returns:
         Код завершения процесса (`0` при успехе, `1` при критическом сбое).
@@ -261,8 +288,10 @@ async def run_background_worker(
             await resolved_container.startup()
 
         runner = BackgroundWorkerRunner(resolved_container)
+        if source_name is not None and not once:
+            logger.warning("Параметр --source действует только вместе с --once и проигнорирован.")
         if once:
-            report = await runner.run_once(reprocess=reprocess, verify_links=verify_links)
+            report = await runner.run_once(reprocess=reprocess, verify_links=verify_links, source_name=source_name)
             if report.sources_failed > 0 and report.sources_processed == 0:
                 logger.error(
                     "Однократный запуск завершился критическим отказом всех источников (sources_failed=%s).",
@@ -336,6 +365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 once=bool(arguments.once),
                 reprocess=bool(arguments.reprocess),
                 verify_links=bool(arguments.verify_links),
+                source_name=arguments.source,
             )
         )
     except KeyboardInterrupt:
