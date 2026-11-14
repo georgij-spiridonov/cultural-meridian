@@ -1077,3 +1077,231 @@ dialog::backdrop {
   flex-wrap: wrap;
   gap: 14px;
 }
+
+/* Планировщик «Выходной день» и промо-блок */
+.planner-promo {
+  background: linear-gradient(135deg, var(--surface-card) 0%, var(--surface-tint) 100%);
+  border-color: #b7d2ca;
+}
+
+.planner-promo__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.planner-promo__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.planner-intro__title {
+  margin: 0 0 8px;
+  font-size: clamp(1.35rem, 2.8vw, 1.85rem);
+  line-height: 1.2;
+}
+
+.planner-intro__subtitle {
+  margin: 0;
+  color: var(--ink-secondary);
+  max-width: 72ch;
+}
+
+.planner-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+@media (min-width: 640px) {
+  .planner-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .planner-form-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.planner-date-field {
+  min-width: 0;
+}
+
+.planner-quick-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.planner-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--surface-muted);
+}
+
+.planner-route-heading {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 800;
+}
+
+.planner-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.planner-leg {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 8px 17px;
+}
+
+.planner-leg__line {
+  width: 2px;
+  height: 26px;
+  background-color: var(--border-strong);
+  flex-shrink: 0;
+}
+
+.planner-leg__badge {
+  font-variant-numeric: tabular-nums;
+}
+
+.planner-step {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.planner-step__marker {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background-color: var(--brand-primary);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 0.95rem;
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+
+.planner-step__card {
+  min-width: 0;
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+}
+
+@media (max-width: 479px) {
+  .planner-step {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .planner-step__marker {
+    width: 28px;
+    height: 28px;
+    font-size: 0.84rem;
+  }
+
+  .planner-leg {
+    padding-left: 13px;
+  }
+
+  .planner-step__card {
+    padding: 14px;
+  }
+}
+
+.planner-step__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.planner-step__time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.planner-step__cost {
+  font-weight: 800;
+  font-size: 1rem;
+  color: var(--ink-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.planner-step__footer-note {
+  font-size: 0.85rem;
+  color: var(--ink-secondary);
+  font-weight: 600;
+}
+
+.planner-relaxations__heading {
+  margin: 0 0 12px;
+  font-size: 1rem;
+}
+
+.planner-relaxations {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+@media (min-width: 720px) {
+  .planner-relaxations {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.relaxation-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid #f4cc8a;
+  background-color: var(--warning-bg);
+}
+
+.relaxation-card__explanation {
+  margin: 8px 0 4px;
+  font-size: 0.92rem;
+  color: var(--ink-primary);
+}
+
+.relaxation-card__suggestion {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--warning-ink);
+}
+
+.relaxation-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

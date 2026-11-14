@@ -1,0 +1,168 @@
+{% if planner_error %}
+  <div class="alert alert--danger" role="alert" data-planner-status>
+    <strong>Не удалось выполнить расчёт маршрута:</strong> {{ planner_error }}
+  </div>
+{% elif not has_submitted %}
+  <section class="empty-state" aria-label="Подготовка маршрута">
+    <h2 class="empty-state__title" data-planner-status>Готовы спланировать ваш выходной</h2>
+    <p class="empty-state__summary">
+      Выберите город, дату (например, ближайшую субботу или воскресенье), удобное время, общий бюджет
+      и нажмите <strong>«Подобрать маршрут»</strong> — сервис соберёт от 2 до 4 непересекающихся событий
+      с расчётом дороги между площадками.
+    </p>
+  </section>
+{% elif plan_result and plan_result.is_feasible %}
+  <section class="planner-results-section" aria-labelledby="planner-route-heading">
+    <div class="results-toolbar">
+      <div>
+        <h2 id="planner-route-heading" class="planner-route-heading" data-planner-status>
+          Подобран маршрут из {{ plan_result.steps | length }} мероприятий ({{ form_values.city }}, {{ form_values.target_date }})
+        </h2>
+      </div>
+      <div class="results-toolbar__actions">
+        <button class="button button--small" type="button" data-copy-action="url">
+          Скопировать ссылку на маршрут
+        </button>
+      </div>
+    </div>
+
+    <div class="kpi-strip" aria-label="Сводка маршрута">
+      <div class="kpi-card">
+        <span class="kpi-card__label">Событий в маршруте</span>
+        <span class="kpi-card__value">{{ plan_result.steps | length }}</span>
+      </div>
+
+      <div class="kpi-card">
+        <span class="kpi-card__label">Стоимость на компанию ({{ form_values.companions_count }} чел.)</span>
+        <span class="kpi-card__value">
+          {% if plan_result.total_minimum_cost_rubles == 0 and plan_result.total_maximum_cost_rubles == 0 %}
+            Бесплатно
+          {% elif plan_result.total_minimum_cost_rubles == plan_result.total_maximum_cost_rubles %}
+            {{ format_rubles(plan_result.total_minimum_cost_rubles) }}
+          {% else %}
+            {{ plan_result.total_minimum_cost_rubles }}–{{ format_rubles(plan_result.total_maximum_cost_rubles) }}
+          {% endif %}
+        </span>
+      </div>
+
+      <div class="kpi-card">
+        <span class="kpi-card__label">Итого в пути</span>
+        <span class="kpi-card__value">{{ plan_result.total_travel_minutes }} мин</span>
+      </div>
+
+      <div class="kpi-card">
+        <span class="kpi-card__label">Окно времени</span>
+        <span class="kpi-card__value">{{ form_values.window_start_time }}–{{ form_values.window_end_time }}</span>
+      </div>
+    </div>
+
+    <ol class="planner-timeline">
+      {% for step in plan_result.steps %}
+        {% if not loop.first %}
+          <li class="planner-leg" aria-label="Переезд к шагу {{ loop.index }}">
+            <span class="planner-leg__line" aria-hidden="true"></span>
+            {% if step.travel_from_previous_minutes == 0 %}
+              <span class="badge badge--free planner-leg__badge">0 мин — та же площадка</span>
+            {% else %}
+              <span class="badge badge--neutral planner-leg__badge">~{{ step.travel_from_previous_minutes }} мин в пути</span>
+            {% endif %}
+          </li>
+        {% endif %}
+
+        <li class="planner-step">
+          <div class="planner-step__marker" aria-hidden="true">{{ loop.index }}</div>
+          <article class="planner-step__card">
+            <div class="planner-step__header">
+              <div class="event-card__badges" style="margin-bottom: 0;">
+                <span class="badge badge--neutral planner-step__time">
+                  {{ format_step_time(step.starts_at) }}–{{ format_step_time(step.ends_at) }}
+                </span>
+                <span class="badge badge--category">
+                  {{ category_labels.get(step.category, step.category.value) }}
+                </span>
+                {% if step.total_cost_rubles == 0 %}
+                  <span class="badge badge--free">Бесплатно</span>
+                {% endif %}
+              </div>
+              <span class="planner-step__cost">
+                {% if step.total_cost_rubles == 0 %}
+                  0 ₽
+                {% else %}
+                  {{ format_rubles(step.total_cost_rubles) }}
+                {% endif %}
+              </span>
+            </div>
+
+            <h3 class="event-card__title" style="margin-top: 10px;">
+              <a href="/events/{{ step.event_identifier }}">{{ step.title }}</a>
+            </h3>
+
+            <ul class="event-card__meta">
+              <li><strong>Площадка:</strong> {{ step.venue }}</li>
+              <li><strong>Адрес:</strong> {{ step.address }}</li>
+              {% if step.price_minimum_rubles > 0 or step.price_maximum_rubles > 0 %}
+                <li>
+                  <strong>Билет на 1 чел.:</strong>
+                  {% if step.price_minimum_rubles == step.price_maximum_rubles %}
+                    {{ format_rubles(step.price_minimum_rubles) }}
+                  {% else %}
+                    от {{ step.price_minimum_rubles }} до {{ format_rubles(step.price_maximum_rubles) }}
+                  {% endif %}
+                </li>
+              {% endif %}
+            </ul>
+
+            <div class="event-card__footer" style="margin-top: 12px;">
+              <span class="planner-step__footer-note">
+                Шаг {{ loop.index }} из {{ plan_result.steps | length }}
+              </span>
+              <a class="button button--small button--primary" href="/events/{{ step.event_identifier }}">
+                Подробнее о событии →
+              </a>
+            </div>
+          </article>
+        </li>
+      {% endfor %}
+    </ol>
+  </section>
+{% elif plan_result %}
+  <section class="empty-state" aria-labelledby="planner-infeasible-title">
+    <h2 id="planner-infeasible-title" class="empty-state__title" data-planner-status>
+      Маршрут при текущих ограничениях не сложился
+    </h2>
+    <p class="empty-state__summary">
+      {{ plan_result.failure_reason or "Не удалось подобрать от 2 до 4 непересекающихся мероприятий." }}
+    </p>
+
+    {% if relaxation_actions %}
+      <h3 class="planner-relaxations__heading">Как быстро ослабить ограничения:</h3>
+      <div class="planner-relaxations">
+        {% for item in relaxation_actions %}
+          <article class="relaxation-card">
+            <div class="relaxation-card__body">
+              <span class="badge badge--warning">{{ item.constraint_label }}</span>
+              <p class="relaxation-card__explanation">{{ item.explanation }}</p>
+              <p class="relaxation-card__suggestion">{{ item.suggested_change }}</p>
+            </div>
+            {% if item.is_actionable %}
+              <div class="relaxation-card__actions">
+                <a
+                  class="button button--small button--primary"
+                  href="{{ item.fallback_href }}"
+                  data-relax-apply="true"
+                  {% if "budget_rubles" in item.patch_fields %}data-patch-budget="{{ item.patch_fields['budget_rubles'] }}"{% endif %}
+                  {% if "window_start_time" in item.patch_fields %}data-patch-window-start="{{ item.patch_fields['window_start_time'] }}"{% endif %}
+                  {% if "window_end_time" in item.patch_fields %}data-patch-window-end="{{ item.patch_fields['window_end_time'] }}"{% endif %}
+                  {% if "maximum_travel_minutes" in item.patch_fields %}data-patch-travel="{{ item.patch_fields['maximum_travel_minutes'] }}"{% endif %}
+                  {% if "child_age" in item.patch_fields %}data-patch-child-age="{{ item.patch_fields['child_age'] }}"{% endif %}
+                >
+                  {{ item.action_label }}
+                </a>
+              </div>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+{% endif %}

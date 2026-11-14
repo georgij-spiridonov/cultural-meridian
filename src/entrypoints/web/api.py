@@ -1,6 +1,6 @@
 """Версионированный REST API `/api/v1`, OpenAPI 3.1 схемы и единый обработчик ошибок."""
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.application import EventSearchService, SubscriptionService
+from src.application import EventSearchService, SubscriptionService, WeekendPlannerService
 from src.core.exceptions import (
     ApplicationException,
     InfrastructureException,
@@ -21,6 +21,7 @@ from src.core.logger import get_logger
 from src.core.types import DialogChannel, EventCategory, EventStatus, SourceType
 from src.domain.entities import (
     CityReference,
+    ConstraintRelaxationSuggestion,
     EmptySearchExplanation,
     Event,
     EventSearchFilter,
@@ -32,12 +33,16 @@ from src.domain.entities import (
     SortDirection,
     SubscriptionRecord,
     VenueReference,
+    WeekendPlanRequest,
+    WeekendPlanResult,
+    WeekendPlanStep,
 )
 from src.domain.exceptions import (
     DuplicateEventConflictError,
     EventNotFoundError,
     InvalidEventDataError,
     InvalidSearchFilterError,
+    InvalidWeekendPlanRequestError,
     ModerationItemNotFoundError,
     PromptInjectionDetectedError,
     SubscriptionNotFoundError,
@@ -56,6 +61,7 @@ from src.entrypoints.web.middleware import InMemoryRateLimiter, RequestMetricsCo
 
 __all__ = [
     "CityReferenceSchema",
+    "ConstraintRelaxationSchema",
     "EmptySearchExplanationSchema",
     "ErrorResponse",
     "EventDetailSchema",
@@ -71,6 +77,9 @@ __all__ = [
     "SubscriptionDeletedSchema",
     "SubscriptionSchema",
     "VenueReferenceSchema",
+    "WeekendPlanApiRequest",
+    "WeekendPlanApiResponse",
+    "WeekendPlanStepSchema",
     "create_api_router",
     "register_exception_handlers",
     "register_observability_routes",
@@ -484,6 +493,221 @@ class MetricsResponse(BaseModel):
     p95_latency_milliseconds: float
 
 
+class WeekendPlanApiRequest(BaseModel):
+    """Запрос на подбор непересекающегося маршрута выходного дня."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "city": "Уфа",
+                "target_date": "2026-11-21",
+                "window_start_time": "10:00:00",
+                "window_end_time": "21:00:00",
+                "budget_rubles": 2000,
+                "companions_count": 2,
+                "child_age": 6,
+                "maximum_travel_minutes": 25,
+            }
+        },
+    )
+
+    city: str = Field(
+        min_length=1,
+        max_length=120,
+        description="Город или населённый пункт Республики Башкортостан (допускает словоформы).",
+    )
+    target_date: date = Field(description="Целевая дата посещения мероприятий (YYYY-MM-DD).")
+    window_start_time: time = Field(description="Время начала свободного окна (HH:MM или HH:MM:SS).")
+    window_end_time: time = Field(description="Время окончания свободного окна (HH:MM или HH:MM:SS).")
+    budget_rubles: int = Field(ge=0, description="Максимальный общий бюджет маршрута на всех участников в рублях.")
+    companions_count: int = Field(default=1, ge=1, le=50, description="Количество участников маршрута.")
+    child_age: int | None = Field(
+        default=None,
+        ge=0,
+        le=18,
+        description="Возраст ребёнка в годах для фильтрации по возрастному цензу (необязательно).",
+    )
+    maximum_travel_minutes: int = Field(
+        default=20,
+        ge=0,
+        le=240,
+        description="Максимально допустимое время перемещения между соседними площадками в минутах.",
+    )
+
+
+class WeekendPlanStepSchema(BaseModel):
+    """Отдельное мероприятие в составе подобранного маршрута выходного дня."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "example": {
+                "event_identifier": "66c51c98-97f9-473c-8b42-9382f84a83de",
+                "title": "Щелкунчик",
+                "category": "spectacle",
+                "category_label": "Спектакли",
+                "venue": "Башкирский государственный театр оперы и балета",
+                "address": "ул. Ленина, 5/1",
+                "starts_at": "2026-11-21T12:00:00+05:00",
+                "ends_at": "2026-11-21T14:10:00+05:00",
+                "price_minimum_rubles": 500,
+                "price_maximum_rubles": 1800,
+                "total_cost_rubles": 1000,
+                "travel_from_previous_minutes": 0,
+                "event_path": "/events/66c51c98-97f9-473c-8b42-9382f84a83de",
+            }
+        },
+    )
+
+    event_identifier: UUID = Field(description="Уникальный идентификатор мероприятия в каталоге.")
+    title: str = Field(description="Название мероприятия.")
+    category: EventCategory = Field(description="Код категории мероприятия.")
+    category_label: str = Field(description="Русское наименование категории мероприятия.")
+    venue: str = Field(description="Название площадки проведения.")
+    address: str = Field(description="Адрес площадки.")
+    starts_at: datetime = Field(description="Время начала мероприятия с учётом часового пояса.")
+    ends_at: datetime = Field(description="Расчётное или точное время окончания мероприятия.")
+    price_minimum_rubles: int = Field(ge=0, description="Минимальная стоимость одного билета в рублях.")
+    price_maximum_rubles: int = Field(ge=0, description="Максимальная стоимость одного билета в рублях.")
+    total_cost_rubles: int = Field(ge=0, description="Оценочная минимальная стоимость на всех участников в рублях.")
+    travel_from_previous_minutes: int = Field(ge=0, description="Время в пути от предыдущей точки маршрута в минутах.")
+    event_path: str = Field(description="Относительный путь к карточке мероприятия в веб-афише.")
+
+    @classmethod
+    def from_domain(cls, step: WeekendPlanStep) -> WeekendPlanStepSchema:
+        """Преобразует доменный шаг маршрута в схему REST API."""
+        return cls(
+            event_identifier=step.event_identifier,
+            title=step.title,
+            category=step.category,
+            category_label=CATEGORY_LABELS.get(step.category, step.category.value),
+            venue=step.venue,
+            address=step.address,
+            starts_at=step.starts_at,
+            ends_at=step.ends_at,
+            price_minimum_rubles=step.price_minimum_rubles,
+            price_maximum_rubles=step.price_maximum_rubles,
+            total_cost_rubles=step.total_cost_rubles,
+            travel_from_previous_minutes=step.travel_from_previous_minutes,
+            event_path=f"/events/{step.event_identifier}",
+        )
+
+
+class ConstraintRelaxationSchema(BaseModel):
+    """Предложение минимального ослабления ограничения при невозможности составить маршрут."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "example": {
+                "constraint_name": "budget",
+                "explanation": "Общего бюджета 500 ₽ на 2 чел. недостаточно для набора из 2–4 подходящих мероприятий.",
+                "suggested_change": "Увеличить общий бюджет минимум до 1200 ₽.",
+            }
+        },
+    )
+
+    constraint_name: str = Field(
+        description="Название конфликтующего ограничения (`budget`, `time_window`, `travel`, `age`, `count`)."
+    )
+    explanation: str = Field(description="Понятное жителю объяснение причины невозможности подбора.")
+    suggested_change: str = Field(description="Минимальное изменение параметра, при котором маршрут собирается.")
+
+    @classmethod
+    def from_domain(cls, suggestion: ConstraintRelaxationSuggestion) -> ConstraintRelaxationSchema:
+        """Преобразует доменное предложение релаксации в схему REST API."""
+        return cls(
+            constraint_name=suggestion.constraint_name,
+            explanation=suggestion.explanation,
+            suggested_change=suggestion.suggested_change,
+        )
+
+
+class WeekendPlanApiResponse(BaseModel):
+    """Результат работы планировщика «Выходной день» (маршрут или диагностика конфликта)."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "example": {
+                "is_feasible": True,
+                "steps": [
+                    {
+                        "event_identifier": "66c51c98-97f9-473c-8b42-9382f84a83de",
+                        "title": "Выставка современной графики",
+                        "category": "exhibition",
+                        "category_label": "Выставки",
+                        "venue": "Национальный музей РБ",
+                        "address": "ул. Советская, 14",
+                        "starts_at": "2026-11-21T11:00:00+05:00",
+                        "ends_at": "2026-11-21T12:30:00+05:00",
+                        "price_minimum_rubles": 200,
+                        "price_maximum_rubles": 400,
+                        "total_cost_rubles": 400,
+                        "travel_from_previous_minutes": 0,
+                        "event_path": "/events/66c51c98-97f9-473c-8b42-9382f84a83de",
+                    },
+                    {
+                        "event_identifier": "77d62d09-12a3-484d-9c53-0493a95b94ef",
+                        "title": "Щелкунчик",
+                        "category": "spectacle",
+                        "category_label": "Спектакли",
+                        "venue": "Башкирский государственный театр оперы и балета",
+                        "address": "ул. Ленина, 5/1",
+                        "starts_at": "2026-11-21T14:00:00+05:00",
+                        "ends_at": "2026-11-21T16:10:00+05:00",
+                        "price_minimum_rubles": 500,
+                        "price_maximum_rubles": 1500,
+                        "total_cost_rubles": 1000,
+                        "travel_from_previous_minutes": 12,
+                        "event_path": "/events/77d62d09-12a3-484d-9c53-0493a95b94ef",
+                    },
+                ],
+                "total_minimum_cost_rubles": 1400,
+                "total_maximum_cost_rubles": 3800,
+                "total_travel_minutes": 12,
+                "failure_reason": None,
+                "relaxation_suggestions": [],
+            }
+        },
+    )
+
+    is_feasible: bool = Field(description="Признак успешного построения маршрута из 2–4 событий.")
+    steps: list[WeekendPlanStepSchema] = Field(
+        default_factory=list, description="Упорядоченная по времени последовательность шагов маршрута."
+    )
+    total_minimum_cost_rubles: int = Field(
+        ge=0, description="Суммарная минимальная стоимость маршрута на всех участников."
+    )
+    total_maximum_cost_rubles: int = Field(
+        ge=0, description="Суммарная максимальная стоимость маршрута на всех участников."
+    )
+    total_travel_minutes: int = Field(ge=0, description="Суммарное время на перемещения между площадками в минутах.")
+    failure_reason: str | None = Field(
+        default=None, description="Причина отсутствия маршрута, если `is_feasible` равно `False`."
+    )
+    relaxation_suggestions: list[ConstraintRelaxationSchema] = Field(
+        default_factory=list, description="Список предложений минимального смягчения ограничений."
+    )
+
+    @classmethod
+    def from_domain(cls, result: WeekendPlanResult) -> WeekendPlanApiResponse:
+        """Преобразует доменный результат планирования в схему REST API."""
+        return cls(
+            is_feasible=result.is_feasible,
+            steps=[WeekendPlanStepSchema.from_domain(step) for step in result.steps],
+            total_minimum_cost_rubles=result.total_minimum_cost_rubles,
+            total_maximum_cost_rubles=result.total_maximum_cost_rubles,
+            total_travel_minutes=result.total_travel_minutes,
+            failure_reason=result.failure_reason,
+            relaxation_suggestions=[
+                ConstraintRelaxationSchema.from_domain(item) for item in result.relaxation_suggestions
+            ],
+        )
+
+
 def _get_container(request: Request) -> ApplicationContainer:
     container = getattr(request.app.state, "container", None)
     if not isinstance(container, ApplicationContainer):
@@ -499,6 +723,10 @@ def _get_subscription_service(
     container: Annotated[ApplicationContainer, Depends(_get_container)],
 ) -> SubscriptionService:
     return container.subscription_service
+
+
+def _get_weekend_planner(container: Annotated[ApplicationContainer, Depends(_get_container)]) -> WeekendPlannerService:
+    return container.weekend_planner
 
 
 def _get_rate_limiter(request: Request) -> InMemoryRateLimiter:
@@ -870,6 +1098,31 @@ def create_api_router() -> APIRouter:
         )
         return FeedbackSchema.from_domain(record)
 
+    @router.post(
+        "/weekend-plan",
+        response_model=WeekendPlanApiResponse,
+        responses={422: {"model": ErrorResponse}},
+        tags=["Планировщик выходного дня"],
+        summary="Подобрать маршрут выходного дня из 2–4 мероприятий",
+    )
+    async def plan_weekend(
+        payload: WeekendPlanApiRequest, weekend_planner: Annotated[WeekendPlannerService, Depends(_get_weekend_planner)]
+    ) -> WeekendPlanApiResponse:
+        """Строит непересекающийся маршрут с учётом бюджета, возраста и времени на дорогу."""
+        result = await weekend_planner.plan_weekend(
+            WeekendPlanRequest(
+                city=payload.city,
+                target_date=payload.target_date,
+                window_start_time=payload.window_start_time,
+                window_end_time=payload.window_end_time,
+                budget_rubles=payload.budget_rubles,
+                companions_count=payload.companions_count,
+                child_age=payload.child_age,
+                maximum_travel_minutes=payload.maximum_travel_minutes,
+            )
+        )
+        return WeekendPlanApiResponse.from_domain(result)
+
     return router
 
 
@@ -949,6 +1202,7 @@ def _map_application_exception_to_http(error: ApplicationException) -> tuple[int
         (
             InvalidSearchFilterError,
             InvalidEventDataError,
+            InvalidWeekendPlanRequestError,
             UnsupportedSourceFormatError,
             PromptInjectionDetectedError,
             ValidationException,
