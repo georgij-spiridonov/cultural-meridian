@@ -3,63 +3,164 @@
 {% block title %}Виртуальный ассистент — Культурный Меридиан{% endblock %}
 
 {% block content %}
-  <section class="panel-card planner-promo" aria-labelledby="planner-promo-heading" style="margin-bottom: 20px;">
-    <div class="planner-promo__body">
+  <section class="panel-card assistant-hero" aria-labelledby="assistant-page-heading">
+    <div class="assistant-hero__body">
       <div>
-        <p class="hero-banner__eyebrow">Интерактивный маршрут</p>
-        <h1 id="planner-promo-heading" style="margin: 0 0 8px; font-size: clamp(1.25rem, 2.5vw, 1.6rem);">
-          Планировщик «Выходной день»
+        <p class="hero-banner__eyebrow">ИИ-помощник по афише Башкортостана</p>
+        <h1 id="assistant-page-heading" class="assistant-hero__title">
+          Виртуальный ассистент «Культурный Меридиан»
         </h1>
-        <p style="margin: 0; color: var(--ink-secondary); max-width: 68ch;">
-          Соберите готовый маршрут из 2–4 мероприятий на субботу или воскресенье с учётом времени на дорогу,
-          общего бюджета компании и возраста ребёнка — без накладок в расписании.
+        <p class="assistant-hero__subtitle">
+          Опишите запрос обычными словами — ассистент подберёт проверенные события из каталога сервиса,
+          ответит на уточнения, поможет составить маршрут на выходные или оформит подписку после вашего подтверждения.
         </p>
       </div>
-      <div class="planner-promo__actions">
-        <a class="button button--primary" href="/planner">Собрать маршрут на выходной →</a>
+
+      <nav class="assistant-quick-nav" aria-label="Связанные разделы сервиса">
+        <a class="button button--small button--primary" href="/planner">Планировщик выходных</a>
+        <a class="button button--small" href="/widget/demo">Конструктор виджета</a>
+        <a class="button button--small" href="/docs" target="_blank" rel="noopener noreferrer">Документация OpenAPI</a>
+      </nav>
+    </div>
+  </section>
+
+  <section class="panel-card assistant-workspace" aria-labelledby="assistant-chat-heading">
+    <div class="assistant-workspace__toolbar">
+      <div class="assistant-workspace__heading-wrap">
+        <h2 id="assistant-chat-heading" class="assistant-workspace__title">Диалог с ассистентом</h2>
+        <span class="badge badge--neutral">Только проверенный каталог</span>
+      </div>
+
+      <div class="assistant-workspace__controls">
+        <span id="assistant-loading" class="htmx-indicator badge badge--neutral">Подбираем ответ…</span>
+        <form
+          action="/assistant/reset"
+          method="post"
+          hx-post="/assistant/reset"
+          hx-target="#assistant-chat"
+          hx-swap="innerHTML"
+          hx-indicator="#assistant-loading"
+          data-assistant-reset-form="true"
+        >
+          <button class="button button--small button--ghost" type="submit">Новый диалог</button>
+        </form>
       </div>
     </div>
-  </section>
 
-  <section class="panel-card" aria-labelledby="scenarios-heading">
-    <h2 id="scenarios-heading" class="panel-card__heading">Готовые сценарии быстрого подбора в каталоге</h2>
-    <div class="events-grid">
-      {% for scenario in quick_scenarios %}
-        <article class="event-card">
-          <div>
-            <h3 class="event-card__title">{{ scenario.title }}</h3>
-            <p class="event-card__description" style="-webkit-line-clamp: unset;">
-              {{ scenario.description }}
-            </p>
-          </div>
-          <div class="event-card__footer">
-            <span class="badge badge--neutral">Готовый фильтр</span>
-            <a class="button button--small button--primary" href="{{ scenario.url }}">Открыть подборку →</a>
-          </div>
-        </article>
-      {% endfor %}
+    {% set default_prompts = [
+      {"title": "Куда сходить в Уфе в выходные?", "prompt": "Куда сходить в Уфе в выходные?"},
+      {"title": "С ребёнком 7 лет до 1000 ₽", "prompt": "С ребёнком 7 лет до 1000 ₽"},
+      {"title": "А подешевле", "prompt": "А подешевле"},
+      {"title": "Только бесплатные", "prompt": "Только бесплатные"},
+      {"title": "Составь маршрут на выходной", "prompt": "Составь маршрут на выходной"}
+    ] %}
+    {% set prompts_to_render = quick_scenarios if quick_scenarios else default_prompts %}
+
+    <div class="assistant-prompts">
+      <p id="assistant-prompts-label" class="assistant-prompts__label">Быстрые сценарии и уточнения:</p>
+      <div
+        class="assistant-prompts__list"
+        role="group"
+        aria-labelledby="assistant-prompts-label"
+        data-assistant-prompts-list="true"
+      >
+        {% for item in prompts_to_render %}
+          {% set item_prompt = item.prompt if item.prompt is defined and item.prompt else (item.user_message if item.user_message is defined and item.user_message else (item.query if item.query is defined and item.query else item.title)) %}
+          {% set item_label = item.title if item.title is defined and item.title else (item.label if item.label is defined and item.label else item_prompt) %}
+          <form
+            class="assistant-chip-form"
+            action="/assistant/turn"
+            method="post"
+            hx-post="/assistant/turn"
+            hx-target="#assistant-chat"
+            hx-swap="innerHTML"
+            hx-indicator="#assistant-loading"
+          >
+            <input type="hidden" name="user_message" value="{{ item_prompt }}" />
+            <button
+              class="assistant-prompt-chip"
+              type="submit"
+              data-assistant-prompt="{{ item_prompt }}"
+              {% if item.description is defined and item.description %}title="{{ item.description }}"{% endif %}
+            >
+              {{ item_label }}
+            </button>
+          </form>
+        {% endfor %}
+      </div>
     </div>
+
+    <div
+      id="assistant-chat"
+      class="assistant-chat-region"
+      role="region"
+      aria-label="Лента сообщений и рекомендаций ассистента"
+      data-assistant-chat-region="true"
+    >
+      {% include "partials/assistant_chat.html" %}
+    </div>
+
+    <form
+      id="assistant-turn-form"
+      class="assistant-composer"
+      action="/assistant/turn"
+      method="post"
+      hx-post="/assistant/turn"
+      hx-target="#assistant-chat"
+      hx-swap="innerHTML"
+      hx-indicator="#assistant-loading"
+      data-assistant-turn-form="true"
+    >
+      <div class="assistant-composer__row">
+        <div class="form-field assistant-composer__field">
+          <label class="form-label" for="assistant-user-message">Ваш вопрос или уточнение</label>
+          <textarea
+            id="assistant-user-message"
+            class="form-control assistant-composer__input"
+            name="user_message"
+            rows="2"
+            minlength="1"
+            maxlength="{{ assistant_max_message_length | default(2000) }}"
+            required
+            data-error="assistant-user-message-error"
+            placeholder="Например: Куда сходить в Уфе в выходные с ребёнком до 1000 ₽?"
+          >{{ user_message_value | default('', true) }}</textarea>
+          <span id="assistant-user-message-error" class="field-error" hidden></span>
+        </div>
+
+        <div class="assistant-composer__actions">
+          <button class="button button--primary assistant-composer__submit" type="submit">
+            Отправить
+          </button>
+        </div>
+      </div>
+
+      <p class="assistant-composer__hint">
+        Enter — отправить сообщение, Shift+Enter — новая строка (до {{ assistant_max_message_length | default(2000) }} символов). Пожалуйста, не указывайте телефон, почту и другие персональные данные.
+      </p>
+    </form>
   </section>
 
-  <div class="split-grid" style="margin-top: 20px;">
+  <div class="split-grid assistant-info-grid">
     <section class="panel-card" aria-labelledby="assistant-capabilities">
-      <h2 id="assistant-capabilities" class="panel-card__heading">Что умеет ассистент в Telegram-канале</h2>
-      <ul class="empty-state__list" style="margin-bottom: 0;">
-        <li>Понимает запросы на естественном языке («Куда сходить в Уфе на выходных бесплатно с ребёнком?»).</li>
-        <li>Строит <strong>«План на выходные»</strong> с расписанием без пересечений и временем на дорогу.</li>
-        <li>При нулевой выдаче честно называет ограничивающий фильтр и предлагает готовое ослабление.</li>
-        <li>Не выдумывает факты и в спорных случаях направляет к официальным ссылкам карточек.</li>
+      <h2 id="assistant-capabilities" class="panel-card__heading">Как работает подбор</h2>
+      <ul class="empty-state__list assistant-list-compact">
+        <li>Понимает естественные запросы и помнит контекст диалога для уточнений вроде «а подешевле».</li>
+        <li>При нехватке данных задаёт уточняющий вопрос и предлагает готовые ослабления фильтров.</li>
+        <li>Строит маршрут <strong>«План на выходные»</strong> с расписанием без накладок и временем на дорогу.</li>
+        <li>Подписки и обращения к редакции выполняются только после вашего явного подтверждения.</li>
       </ul>
     </section>
 
     <section class="panel-card" aria-labelledby="assistant-api">
-      <h2 id="assistant-api" class="panel-card__heading">Подключение через REST API и встраиваемый виджет</h2>
-      <p style="margin: 0 0 12px; color: var(--ink-secondary); font-size: 0.94rem;">
+      <h2 id="assistant-api" class="panel-card__heading">Интеграция и маршруты сервиса</h2>
+      <p class="assistant-info-text">
         Для городских порталов, музеев и библиотек доступен OpenAPI 3.1 и изолированный виджет на Shadow DOM,
         который работает даже на стороннем сайте без передачи cookies.
       </p>
-      <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <a class="button button--primary" href="/widget/demo">Конструктор виджета</a>
+      <div class="assistant-info-actions">
+        <a class="button button--primary" href="/planner">Планировщик выходных</a>
+        <a class="button" href="/widget/demo">Конструктор виджета</a>
         <a class="button" href="/docs" target="_blank" rel="noopener noreferrer">Документация OpenAPI</a>
       </div>
     </section>
