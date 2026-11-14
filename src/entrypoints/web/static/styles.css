@@ -1510,12 +1510,6 @@ dialog::backdrop {
   max-width: 68ch;
 }
 
-.assistant-quick-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 .assistant-workspace {
   margin-bottom: 20px;
 }
