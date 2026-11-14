@@ -202,6 +202,10 @@ class TelegramSettings(BaseSettings):
         PUBLIC_WEB_BASE_URL: Публичный базовый URL веб-каталога для кнопок перехода на сайт (если настроен).
         DIALOG_HISTORY_LIMIT: Количество последних реплик, загружаемых из диалоговой сессии.
         PENDING_ACTION_LIFETIME_SECONDS: Время жизни запроса на подтверждение изменяющего действия в секундах.
+        NOTIFICATION_POLL_INTERVAL_SECONDS: Интервал опроса очереди уведомлений по подпискам в секундах.
+        NOTIFICATION_BATCH_SIZE: Максимальное количество уведомлений в одном пакете отправки.
+        NOTIFICATION_MAX_ATTEMPTS: Максимальное число попыток доставки одного Telegram-уведомления.
+        NOTIFICATION_REQUEST_TIMEOUT_SECONDS: Таймаут одного HTTP-запроса отправки уведомления в Telegram в секундах.
     """
 
     model_config = SettingsConfigDict(
@@ -219,6 +223,10 @@ class TelegramSettings(BaseSettings):
     PUBLIC_WEB_BASE_URL: str = ""
     DIALOG_HISTORY_LIMIT: int = Field(default=10, ge=5, le=50)
     PENDING_ACTION_LIFETIME_SECONDS: int = Field(default=600, ge=60, le=86400)
+    NOTIFICATION_POLL_INTERVAL_SECONDS: float = Field(default=10.0, gt=0.0)
+    NOTIFICATION_BATCH_SIZE: int = Field(default=50, ge=1, le=500)
+    NOTIFICATION_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    NOTIFICATION_REQUEST_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.0, le=30.0)
 
     @field_validator("BOT_TOKEN", "PUBLIC_WEB_BASE_URL", mode="after")
     @classmethod

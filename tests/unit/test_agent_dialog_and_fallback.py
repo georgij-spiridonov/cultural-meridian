@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
+from typing import Literal
 from uuid import UUID, uuid4
 
 from src.application.agent_dialog import AgentDialogService
@@ -16,6 +17,7 @@ from src.domain.entities import (
     AgentToolInvocation,
     AgentTraceRecord,
     AgentTurnResult,
+    AuditLogEntry,
     CityReference,
     DialogMessage,
     DialogSessionState,
@@ -23,13 +25,23 @@ from src.domain.entities import (
     EventSearchFilter,
     EventSearchPage,
     FeedbackRequestRecord,
+    FeedbackStatus,
+    ModerationItem,
+    ModerationStatus,
     PendingAction,
+    SubscriptionNotificationRecord,
     SubscriptionRecord,
     UsageBudgetStatus,
     VenueReference,
 )
-from src.domain.exceptions import EventNotFoundError, PendingActionExpiredError, PendingActionNotFoundError
-from src.domain.ports import AgentToolCallbacks
+from src.domain.exceptions import (
+    EventNotFoundError,
+    ModerationItemNotFoundError,
+    PendingActionExpiredError,
+    PendingActionNotFoundError,
+    SubscriptionNotFoundError,
+)
+from src.domain.ports import AdministrationRepositoryPort, AgentToolCallbacks
 from src.domain.services import BASHKORTOSTAN_TIMEZONE
 
 
@@ -180,16 +192,125 @@ class _InMemoryAdministrationRepositoryStub:
         self.subscriptions.append(subscription)
         return subscription
 
-    async def save_feedback_request(self, *, feedback: FeedbackRequestRecord) -> FeedbackRequestRecord:
-        self.feedback_requests.append(feedback)
-        return feedback
-
     async def list_subscriptions_by_subscriber(
         self, *, channel: DialogChannel, subscriber_identifier: str
     ) -> tuple[SubscriptionRecord, ...]:
         return tuple(
             s for s in self.subscriptions if s.channel == channel and s.subscriber_identifier == subscriber_identifier
         )
+
+    async def delete_subscription(
+        self, *, subscription_identifier: UUID, subscriber_identifier: str | None = None
+    ) -> None:
+        for index, item in enumerate(self.subscriptions):
+            if item.subscription_identifier == subscription_identifier and (
+                subscriber_identifier is None or item.subscriber_identifier == subscriber_identifier
+            ):
+                del self.subscriptions[index]
+                return
+        raise SubscriptionNotFoundError("Подписка не найдена.", subscription_identifier=subscription_identifier)
+
+    async def delete_all_subscriptions_for_subscriber(
+        self, *, channel: DialogChannel, subscriber_identifier: str
+    ) -> int:
+        kept = [
+            item
+            for item in self.subscriptions
+            if not (item.channel == channel and item.subscriber_identifier == subscriber_identifier)
+        ]
+        removed = len(self.subscriptions) - len(kept)
+        self.subscriptions = kept
+        return removed
+
+    async def save_feedback_request(self, *, feedback_request: FeedbackRequestRecord) -> FeedbackRequestRecord:
+        self.feedback_requests.append(feedback_request)
+        return feedback_request
+
+    async def list_feedback_requests(
+        self, *, status: FeedbackStatus | None = None, limit: int = 50
+    ) -> tuple[FeedbackRequestRecord, ...]:
+        items = [item for item in self.feedback_requests if status is None or item.status == status]
+        return tuple(items[:limit])
+
+    async def mark_feedback_reviewed(self, *, feedback_identifier: UUID) -> FeedbackRequestRecord | None:
+        del feedback_identifier
+        return None
+
+    async def enqueue_moderation_item(self, *, moderation_item: ModerationItem) -> ModerationItem:
+        return moderation_item
+
+    async def list_moderation_items(
+        self, *, status: ModerationStatus | None = "pending", limit: int = 50
+    ) -> tuple[ModerationItem, ...]:
+        del status, limit
+        return ()
+
+    async def resolve_moderation_item(
+        self,
+        *,
+        moderation_identifier: UUID,
+        status: Literal["approved", "rejected"],
+        resolved_by: str,
+        resolved_at: datetime,
+    ) -> ModerationItem:
+        del status, resolved_by, resolved_at
+        raise ModerationItemNotFoundError("Задача модерации не найдена.", moderation_identifier=moderation_identifier)
+
+    async def append_audit_log(self, *, entry: AuditLogEntry) -> AuditLogEntry:
+        return entry
+
+    async def list_audit_logs(
+        self, *, entity_identifier: str | None = None, limit: int = 100
+    ) -> tuple[AuditLogEntry, ...]:
+        del entity_identifier, limit
+        return ()
+
+    async def enqueue_subscription_notifications_for_event(self, *, event: Event, created_at: datetime) -> int:
+        del event, created_at
+        return 0
+
+    async def claim_pending_telegram_notifications(
+        self, *, current_time: datetime, limit: int = 50, maximum_attempts: int = 3, stale_after_seconds: int = 300
+    ) -> tuple[SubscriptionNotificationRecord, ...]:
+        del current_time, limit, maximum_attempts, stale_after_seconds
+        return ()
+
+    async def mark_subscription_notification_sent(self, *, notification_identifier: UUID, sent_at: datetime) -> None:
+        del notification_identifier, sent_at
+
+    async def mark_subscription_notification_failed(
+        self,
+        *,
+        notification_identifier: UUID,
+        error_message: str,
+        failed_at: datetime,
+        retry_at: datetime | None = None,
+        is_permanent: bool = False,
+        maximum_attempts: int = 3,
+    ) -> None:
+        del notification_identifier, error_message, failed_at, retry_at, is_permanent, maximum_attempts
+
+    async def count_unread_web_subscription_notifications(self, *, subscriber_identifier: str) -> int:
+        del subscriber_identifier
+        return 0
+
+    async def list_web_subscription_notifications(
+        self, *, subscriber_identifier: str, include_read: bool = False, limit: int = 20
+    ) -> tuple[SubscriptionNotificationRecord, ...]:
+        del subscriber_identifier, include_read, limit
+        return ()
+
+    async def mark_web_subscription_notification_read(
+        self, *, notification_identifier: UUID, subscriber_identifier: str, read_at: datetime
+    ) -> bool:
+        del notification_identifier, subscriber_identifier, read_at
+        return False
+
+    async def mark_all_web_subscription_notifications_read(
+        self, *, subscriber_identifier: str, read_at: datetime
+    ) -> int:
+        del subscriber_identifier, read_at
+        return 0
 
 
 class _OrchestratorStub:
@@ -315,6 +436,7 @@ async def test_dialog_service_preserves_at_least_five_turns_and_post_validates_u
     ungrounded_event = _make_event(title="Галлюцинированный концерт")
     dialog_repo = _InMemoryDialogRepositoryStub()
     admin_repo = _InMemoryAdministrationRepositoryStub()
+    assert isinstance(admin_repo, AdministrationRepositoryPort)
 
     # Предварительно кладём 6 сообщений в сессию, а limit ставим 2 -> должен подняться до >= 5
     now = datetime(2026, 11, 20, 12, 0, tzinfo=BASHKORTOSTAN_TIMEZONE)
@@ -455,6 +577,7 @@ async def test_dialog_service_two_step_confirmation_confirm_cancel_and_expired_t
     settings = LanguageModelSettings(_env_file=None, API_KEY="test-key")
     dialog_repo = _InMemoryDialogRepositoryStub()
     admin_repo = _InMemoryAdministrationRepositoryStub()
+    assert isinstance(admin_repo, AdministrationRepositoryPort)
 
     # 1. Подписка: prepare_subscribe -> "Да"
     sub_service = _build_dialog_service(

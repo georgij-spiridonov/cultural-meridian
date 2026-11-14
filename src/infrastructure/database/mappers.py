@@ -23,6 +23,8 @@ from src.domain.entities import (
     PendingAction,
     PendingActionType,
     RawEventRecord,
+    SubscriptionNotificationRecord,
+    SubscriptionNotificationStatus,
     SubscriptionRecord,
     UsageBudgetStatus,
     VenueReference,
@@ -41,6 +43,7 @@ from src.infrastructure.database.tables import (
     ModeratorRow,
     PendingActionRow,
     RawEventRow,
+    SubscriptionNotificationRow,
     SubscriptionRow,
     VenueRow,
 )
@@ -59,6 +62,7 @@ __all__ = [
     "map_pending_action_from_row",
     "map_raw_event_from_row",
     "map_subscription_from_row",
+    "map_subscription_notification_from_row",
     "map_usage_budget_status",
     "map_venue_from_row",
 ]
@@ -112,6 +116,20 @@ def _cast_feedback_status(status: str) -> FeedbackStatus:
     if status == "reviewed":
         return "reviewed"
     raise ValidationException(f"Недопустимый статус обращения в базе данных: {status!r}.")
+
+
+def _cast_subscription_notification_status(status: str) -> SubscriptionNotificationStatus:
+    if status == "pending":
+        return "pending"
+    if status == "sending":
+        return "sending"
+    if status == "sent":
+        return "sent"
+    if status == "failed":
+        return "failed"
+    if status == "read":
+        return "read"
+    raise ValidationException(f"Недопустимый статус уведомления по подписке в базе данных: {status!r}.")
 
 
 def map_city_from_row(row: CityRow) -> CityReference:
@@ -325,6 +343,32 @@ def map_subscription_from_row(row: SubscriptionRow) -> SubscriptionRecord:
         city=row.city.name if row.city is not None else None,
         category=EventCategory(row.category_code) if row.category_code is not None else None,
         created_at=row.created_at,
+    )
+
+
+def map_subscription_notification_from_row(row: SubscriptionNotificationRow) -> SubscriptionNotificationRecord:
+    """Преобразует ORM-строку уведомления по подписке с загруженным событием в `SubscriptionNotificationRecord`.
+
+    Arguments:
+        row: ORM-строка таблицы `subscription_notifications` с предзагруженным `event`.
+
+    Returns:
+        Неизменяемая запись уведомления по подписке.
+    """
+    return SubscriptionNotificationRecord(
+        notification_identifier=row.identifier,
+        subscription_identifier=row.subscription_identifier,
+        channel=DialogChannel(row.channel),
+        subscriber_identifier=row.subscriber_identifier,
+        event=map_event_from_row(row.event),
+        status=_cast_subscription_notification_status(row.status),
+        attempts=row.attempts,
+        last_error=row.last_error,
+        next_retry_at=row.next_retry_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        sent_at=row.sent_at,
+        read_at=row.read_at,
     )
 
 

@@ -1,9 +1,12 @@
 """Интеграционные тесты четырёх PostgreSQL-репозиториев на реальной базе PostgreSQL 17."""
 
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from src.core.types import DialogChannel, EventCategory, EventStatus, SourceType
 from src.domain.entities import (
@@ -38,11 +41,13 @@ from src.domain.ports import (
 from src.domain.services.deduplication import compute_deduplication_key
 from src.domain.services.normalization import BASHKORTOSTAN_TIMEZONE, normalize_title
 from src.infrastructure.database import (
+    DatabaseEngineManager,
     PostgreSqlAdministrationRepository,
     PostgreSqlDialogRepository,
     PostgreSqlEventRepository,
     PostgreSqlRawEventRepository,
 )
+from src.infrastructure.database.tables import SubscriptionNotificationRow
 
 pytestmark = pytest.mark.integration
 
@@ -544,3 +549,690 @@ async def test_administration_repository_subscriptions_feedback_moderation_and_a
     logs = await administration_repository.list_audit_logs(entity_identifier=str(draft_event.identifier))
     assert len(logs) == 1
     assert logs[0].changes["status"] == "published"
+
+
+async def test_subscription_notifications_migration_and_constraints(
+    database_engine_manager: DatabaseEngineManager,
+    administration_repository: PostgreSqlAdministrationRepository,
+    event_repository: PostgreSqlEventRepository,
+) -> None:
+    """Проверяет схему таблицы `subscription_notifications` после миграции 0002 и её ограничения в PostgreSQL."""
+    async with database_engine_manager.session() as session:
+        alembic_version = (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+        assert alembic_version == "0002"
+
+        columns = set(
+            (
+                await session.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'public' AND table_name = 'subscription_notifications'"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert columns == {
+            "identifier",
+            "subscription_identifier",
+            "event_identifier",
+            "channel",
+            "subscriber_identifier",
+            "status",
+            "attempts",
+            "last_error",
+            "next_retry_at",
+            "created_at",
+            "updated_at",
+            "sent_at",
+            "read_at",
+        }
+
+        constraints = {
+            row[0]: (row[1], row[2])
+            for row in (
+                await session.execute(
+                    text(
+                        "SELECT con.conname, con.contype::text, pg_get_constraintdef(con.oid) "
+                        "FROM pg_constraint con "
+                        "JOIN pg_class rel ON rel.oid = con.conrelid "
+                        "JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace "
+                        "WHERE nsp.nspname = 'public' AND rel.relname = 'subscription_notifications'"
+                    )
+                )
+            ).all()
+        }
+        assert constraints["pk_subscription_notifications"][0] == "p"
+        assert constraints["target_event"][0] == "u"
+        assert constraints["fk_subscription_notifications_event_identifier_events"][0] == "f"
+        assert "ON DELETE CASCADE" in constraints["fk_subscription_notifications_event_identifier_events"][1]
+        # PostgreSQL ограничивает длину идентификаторов 63 байтами, поэтому длинное имя FK усекается
+        subscription_fk_entries = [
+            (name, definition)
+            for name, (contype, definition) in constraints.items()
+            if contype == "f" and name.startswith("fk_subscription_notifications_subscription_identifier")
+        ]
+        assert len(subscription_fk_entries) == 1
+        assert "ON DELETE CASCADE" in subscription_fk_entries[0][1]
+        assert constraints["ck_subscription_notifications_attempts_non_negative"][0] == "c"
+        assert constraints["ck_subscription_notifications_subscriber_non_empty"][0] == "c"
+        assert constraints["ck_subscription_notifications_channel_allowed"][0] == "c"
+        assert constraints["ck_subscription_notifications_status_allowed"][0] == "c"
+
+        indexes = set(
+            (
+                await session.execute(
+                    text(
+                        "SELECT indexname FROM pg_indexes "
+                        "WHERE schemaname = 'public' AND tablename = 'subscription_notifications'"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {
+            "ix_subscription_notifications_pending_dispatch",
+            "ix_subscription_notifications_web_inbox",
+            "ix_subscription_notifications_subscription_identifier",
+            "ix_subscription_notifications_event_identifier",
+        }.issubset(indexes)
+
+    now = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+    subscription = await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-constraint-check",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=now,
+        )
+    )
+    saved_event = await event_repository.save_event(
+        event=_build_test_event(
+            title="Проверка ограничений уведомлений",
+            city="Уфа",
+            venue="ГКЗ «Башкортостан»",
+            category=EventCategory.CONCERT,
+            date_start=datetime(2026, 11, 20, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+        )
+    )
+
+    invalid_cases: list[tuple[str, str, str, int]] = [
+        ("sms", "tg-constraint-check", "pending", 0),
+        ("telegram", "   ", "pending", 0),
+        ("telegram", "tg-constraint-check", "unknown", 0),
+        ("telegram", "tg-constraint-check", "pending", -1),
+    ]
+    async with database_engine_manager.session() as session, session.begin():
+        for channel, subscriber_identifier, status, attempts in invalid_cases:
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    session.add(
+                        SubscriptionNotificationRow(
+                            identifier=uuid4(),
+                            subscription_identifier=subscription.subscription_identifier,
+                            event_identifier=saved_event.identifier,
+                            channel=channel,
+                            subscriber_identifier=subscriber_identifier,
+                            status=status,
+                            attempts=attempts,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    await session.flush()
+
+
+async def test_enqueue_subscription_notifications_matching_dedup_and_statuses(
+    database_engine_manager: DatabaseEngineManager,
+    administration_repository: PostgreSqlAdministrationRepository,
+    event_repository: PostgreSqlEventRepository,
+) -> None:
+    """Проверяет точный и wildcard-матчинг подписок, дедупликацию и игнор неопубликованных событий."""
+    now = datetime(2026, 11, 14, 13, 0, tzinfo=UTC)
+
+    # Точное совпадение, wildcard по категории, wildcard по городу и полный wildcard
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-exact",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=now,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-all-categories",
+            city="Уфа",
+            category=None,
+            created_at=now,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-all-cities",
+            city=None,
+            category=EventCategory.CONCERT,
+            created_at=now,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-wildcard",
+            city=None,
+            category=None,
+            created_at=now,
+        )
+    )
+
+    # Пересекающиеся подписки одного подписчика должны давать 1 строку уведомления на (channel, subscriber, event)
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-overlap",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=now,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-overlap",
+            city=None,
+            category=None,
+            created_at=now + timedelta(seconds=1),
+        )
+    )
+
+    # Неподходящие подписки
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-sterlitamak",
+            city="Стерлитамак",
+            category=EventCategory.CONCERT,
+            created_at=now,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-exhibition-only",
+            city="Уфа",
+            category=EventCategory.EXHIBITION,
+            created_at=now,
+        )
+    )
+
+    # Неопубликованные события (DRAFT в т.ч. в очереди модерации, и CANCELED) игнорируются
+    draft_event = await event_repository.save_event(
+        event=_build_test_event(
+            title="Черновик на модерации",
+            city="Уфа",
+            venue="Башгосфилармония",
+            category=EventCategory.CONCERT,
+            date_start=datetime(2026, 11, 21, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+            status=EventStatus.DRAFT,
+        )
+    )
+    await administration_repository.enqueue_moderation_item(
+        moderation_item=ModerationItem(
+            moderation_identifier=uuid4(),
+            event_identifier=draft_event.identifier,
+            raw_event_identifier=None,
+            reason="Проверка модератором",
+            status="pending",
+            has_suspicious_instructions=False,
+            created_at=now,
+        )
+    )
+    canceled_event = await event_repository.save_event(
+        event=_build_test_event(
+            title="Отменённый концерт",
+            city="Уфа",
+            venue="ГКЗ «Башкортостан»",
+            category=EventCategory.CONCERT,
+            date_start=datetime(2026, 11, 22, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+            status=EventStatus.CANCELED,
+        )
+    )
+    assert (
+        await administration_repository.enqueue_subscription_notifications_for_event(event=draft_event, created_at=now)
+        == 0
+    )
+    assert (
+        await administration_repository.enqueue_subscription_notifications_for_event(
+            event=canceled_event, created_at=now
+        )
+        == 0
+    )
+
+    published_event = await event_repository.save_event(
+        event=_build_test_event(
+            title="Симфония Башкортостана",
+            city="Уфа",
+            venue="Башгосфилармония",
+            category=EventCategory.CONCERT,
+            date_start=datetime(2026, 11, 23, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+            status=EventStatus.PUBLISHED,
+        )
+    )
+    enqueued_count = await administration_repository.enqueue_subscription_notifications_for_event(
+        event=published_event, created_at=now
+    )
+    assert enqueued_count == 5
+
+    # Повторный вызов для того же события идемпотентен
+    assert (
+        await administration_repository.enqueue_subscription_notifications_for_event(
+            event=published_event, created_at=now + timedelta(minutes=1)
+        )
+        == 0
+    )
+
+    async with database_engine_manager.session() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(SubscriptionNotificationRow).where(
+                        SubscriptionNotificationRow.event_identifier == published_event.identifier
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        subscribers = {(row.channel, row.subscriber_identifier) for row in rows}
+        assert len(rows) == 5
+        assert subscribers == {
+            ("telegram", "tg-exact"),
+            ("telegram", "tg-all-categories"),
+            ("telegram", "tg-overlap"),
+            ("web", "web-all-cities"),
+            ("web", "web-wildcard"),
+        }
+
+
+async def test_claim_pending_telegram_notifications_retries_stale_and_skip_locked(
+    database_engine_manager: DatabaseEngineManager,
+    administration_repository: PostgreSqlAdministrationRepository,
+    event_repository: PostgreSqlEventRepository,
+) -> None:
+    """Проверяет захват пачек, backoff повторов, восстановление зависших `sending` и `SKIP LOCKED`."""
+    base_time = datetime(2026, 11, 14, 14, 0, tzinfo=UTC)
+
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.TELEGRAM,
+            subscriber_identifier="tg-worker-1",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=base_time,
+        )
+    )
+    await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-ignored-by-claim",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=base_time,
+        )
+    )
+
+    events = [
+        await event_repository.save_event(
+            event=_build_test_event(
+                title=f"Концерт для очереди #{index}",
+                city="Уфа",
+                venue="Башгосфилармония",
+                category=EventCategory.CONCERT,
+                date_start=datetime(2026, 11, 24 + index, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+            )
+        )
+        for index in range(3)
+    ]
+    for index, event in enumerate(events):
+        await administration_repository.enqueue_subscription_notifications_for_event(
+            event=event, created_at=base_time + timedelta(seconds=index)
+        )
+
+    # Захватываем пачку из 2 штук: статус -> sending, attempts -> 1; web-канал не затрагивается
+    first_claim = await administration_repository.claim_pending_telegram_notifications(
+        current_time=base_time, limit=2, maximum_attempts=3, stale_after_seconds=300
+    )
+    assert len(first_claim) == 2
+    assert all(item.status == "sending" and item.attempts == 1 for item in first_claim)
+    assert all(item.channel is DialogChannel.TELEGRAM for item in first_claim)
+
+    # Первый элемент падает с временной ошибкой и откладывается на +5 минут
+    retry_at = base_time + timedelta(minutes=5)
+    await administration_repository.mark_subscription_notification_failed(
+        notification_identifier=first_claim[0].notification_identifier,
+        error_message="HTTP 503 Service Unavailable",
+        failed_at=base_time + timedelta(seconds=10),
+        retry_at=retry_at,
+        is_permanent=False,
+        maximum_attempts=3,
+    )
+
+    # До наступления retry_at и stale_after_seconds забирается только оставшееся 3-е событие
+    early_claim = await administration_repository.claim_pending_telegram_notifications(
+        current_time=base_time + timedelta(minutes=1), limit=10, maximum_attempts=3, stale_after_seconds=300
+    )
+    assert [item.event.identifier for item in early_claim] == [events[2].identifier]
+
+    # Помечаем 3-е событие доставленным, а 2-е оставляем зависшим в `sending` на t=base_time
+    await administration_repository.mark_subscription_notification_sent(
+        notification_identifier=early_claim[0].notification_identifier, sent_at=base_time + timedelta(minutes=1)
+    )
+
+    # Через 6 минут (>5 мин retry_at и >300с stale_after_seconds) обе записи возвращаются в захват с attempts=2
+    recovered_claim = await administration_repository.claim_pending_telegram_notifications(
+        current_time=base_time + timedelta(minutes=6), limit=10, maximum_attempts=3, stale_after_seconds=300
+    )
+    recovered_ids = {item.notification_identifier for item in recovered_claim}
+    assert recovered_ids == {first_claim[0].notification_identifier, first_claim[1].notification_identifier}
+    assert all(item.attempts == 2 and item.status == "sending" for item in recovered_claim)
+
+    # Постоянная ошибка сразу переводит в failed, исчерпание попыток (attempts=2 >= maximum_attempts=2) — тоже в failed
+    await administration_repository.mark_subscription_notification_failed(
+        notification_identifier=first_claim[0].notification_identifier,
+        error_message="HTTP 403 Forbidden: bot was blocked by the user",
+        failed_at=base_time + timedelta(minutes=7),
+        is_permanent=True,
+        maximum_attempts=3,
+    )
+    await administration_repository.mark_subscription_notification_failed(
+        notification_identifier=first_claim[1].notification_identifier,
+        error_message="HTTP 502 Bad Gateway",
+        failed_at=base_time + timedelta(minutes=7),
+        retry_at=base_time + timedelta(minutes=10),
+        is_permanent=False,
+        maximum_attempts=2,
+    )
+    assert (
+        await administration_repository.claim_pending_telegram_notifications(
+            current_time=base_time + timedelta(minutes=20), limit=10, maximum_attempts=3, stale_after_seconds=60
+        )
+        == ()
+    )
+
+    # Проверка конкурентного захвата `FOR UPDATE OF subscription_notifications SKIP LOCKED`
+    concurrent_event = await event_repository.save_event(
+        event=_build_test_event(
+            title="Конкурентная рассылка",
+            city="Стерлитамак",
+            venue="СГТКО",
+            category=EventCategory.SPECTACLE,
+            date_start=datetime(2026, 11, 29, 18, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+        )
+    )
+    for idx in range(4):
+        await administration_repository.create_subscription(
+            subscription=SubscriptionRecord(
+                subscription_identifier=uuid4(),
+                channel=DialogChannel.TELEGRAM,
+                subscriber_identifier=f"tg-parallel-{idx}",
+                city="Стерлитамак",
+                category=EventCategory.SPECTACLE,
+                created_at=base_time + timedelta(seconds=idx),
+            )
+        )
+    await administration_repository.enqueue_subscription_notifications_for_event(
+        event=concurrent_event, created_at=base_time + timedelta(minutes=25)
+    )
+
+    async with database_engine_manager.session() as lock_session, lock_session.begin():
+        locked_ids = tuple(
+            (
+                await lock_session.execute(
+                    select(SubscriptionNotificationRow.identifier)
+                    .where(
+                        (SubscriptionNotificationRow.event_identifier == concurrent_event.identifier)
+                        & (SubscriptionNotificationRow.status == "pending")
+                    )
+                    .order_by(
+                        SubscriptionNotificationRow.created_at.asc(), SubscriptionNotificationRow.identifier.asc()
+                    )
+                    .limit(2)
+                    .with_for_update(of=SubscriptionNotificationRow, skip_locked=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(locked_ids) == 2
+
+        # Пока первая транзакция удерживает блокировку на 2 строках, параллельная сессия получает другие 2 строки
+        second_batch = await administration_repository.claim_pending_telegram_notifications(
+            current_time=base_time + timedelta(minutes=26), limit=2, maximum_attempts=3, stale_after_seconds=300
+        )
+        second_ids = {item.notification_identifier for item in second_batch}
+        assert len(second_ids) == 2
+        assert set(locked_ids).isdisjoint(second_ids)
+
+    # Параллельный asyncio.gather также не пересекается
+    third_batch, fourth_batch = await asyncio.gather(
+        administration_repository.claim_pending_telegram_notifications(
+            current_time=base_time + timedelta(minutes=27), limit=1, maximum_attempts=3, stale_after_seconds=300
+        ),
+        administration_repository.claim_pending_telegram_notifications(
+            current_time=base_time + timedelta(minutes=27), limit=1, maximum_attempts=3, stale_after_seconds=300
+        ),
+    )
+    combined_parallel_ids = {item.notification_identifier for item in (*third_batch, *fourth_batch)}
+    assert combined_parallel_ids == set(locked_ids)
+
+
+async def test_web_notifications_lifecycle_and_cascade_delete(
+    database_engine_manager: DatabaseEngineManager,
+    administration_repository: PostgreSqlAdministrationRepository,
+    event_repository: PostgreSqlEventRepository,
+) -> None:
+    """Проверяет веб-inbox, отметку прочитанным и каскадное удаление уведомлений при отписке."""
+    base_time = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
+
+    alice_sub = await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-alice",
+            city="Уфа",
+            category=EventCategory.CONCERT,
+            created_at=base_time,
+        )
+    )
+    bob_sub = await administration_repository.create_subscription(
+        subscription=SubscriptionRecord(
+            subscription_identifier=uuid4(),
+            channel=DialogChannel.WEB,
+            subscriber_identifier="web-bob",
+            city="Уфа",
+            category=None,
+            created_at=base_time,
+        )
+    )
+
+    concert_events = [
+        await event_repository.save_event(
+            event=_build_test_event(
+                title=f"Веб-концерт №{idx + 1}",
+                city="Уфа",
+                venue="ГКЗ «Башкортостан»",
+                category=EventCategory.CONCERT,
+                date_start=datetime(2026, 12, 1 + idx, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+            )
+        )
+        for idx in range(3)
+    ]
+    canceled_later = await event_repository.save_event(
+        event=_build_test_event(
+            title="Позже отменённый концерт",
+            city="Уфа",
+            venue="Башгосфилармония",
+            category=EventCategory.CONCERT,
+            date_start=datetime(2026, 12, 10, 19, 0, tzinfo=BASHKORTOSTAN_TIMEZONE),
+        )
+    )
+
+    for idx, event in enumerate([*concert_events, canceled_later]):
+        await administration_repository.enqueue_subscription_notifications_for_event(
+            event=event, created_at=base_time + timedelta(minutes=idx)
+        )
+
+    # Переводим последнее событие в CANCELED: оно не должно попадать в веб-ленту и счётчик непрочитанных
+    await event_repository.save_event(
+        event=Event(
+            identifier=canceled_later.identifier,
+            title=canceled_later.title,
+            normalized_title=canceled_later.normalized_title,
+            category=canceled_later.category,
+            tags=canceled_later.tags,
+            date_start=canceled_later.date_start,
+            date_end=canceled_later.date_end,
+            duration_minutes=canceled_later.duration_minutes,
+            city=canceled_later.city,
+            venue=canceled_later.venue,
+            address=canceled_later.address,
+            latitude=canceled_later.latitude,
+            longitude=canceled_later.longitude,
+            description=canceled_later.description,
+            price_minimum=canceled_later.price_minimum,
+            price_maximum=canceled_later.price_maximum,
+            is_free=canceled_later.is_free,
+            age_limit=canceled_later.age_limit,
+            language=canceled_later.language,
+            organization_link=canceled_later.organization_link,
+            source_url=canceled_later.source_url,
+            source_type=canceled_later.source_type,
+            source_hash=canceled_later.source_hash,
+            verified_at=canceled_later.verified_at,
+            confidence=canceled_later.confidence,
+            status=EventStatus.CANCELED,
+            deduplication_key=canceled_later.deduplication_key,
+            created_at=canceled_later.created_at,
+            updated_at=base_time + timedelta(minutes=5),
+            sources=canceled_later.sources,
+        )
+    )
+
+    assert (
+        await administration_repository.count_unread_web_subscription_notifications(subscriber_identifier="web-alice")
+        == 3
+    )
+    alice_items = await administration_repository.list_web_subscription_notifications(
+        subscriber_identifier="web-alice", include_read=False, limit=10
+    )
+    assert [item.event.title for item in alice_items] == ["Веб-концерт №3", "Веб-концерт №2", "Веб-концерт №1"]
+
+    # Чужой пользователь не может отметить уведомление Алисы прочитанным
+    assert (
+        await administration_repository.mark_web_subscription_notification_read(
+            notification_identifier=alice_items[0].notification_identifier,
+            subscriber_identifier="web-bob",
+            read_at=base_time + timedelta(minutes=6),
+        )
+        is False
+    )
+    assert (
+        await administration_repository.mark_web_subscription_notification_read(
+            notification_identifier=alice_items[0].notification_identifier,
+            subscriber_identifier="web-alice",
+            read_at=base_time + timedelta(minutes=6),
+        )
+        is True
+    )
+    assert (
+        await administration_repository.count_unread_web_subscription_notifications(subscriber_identifier="web-alice")
+        == 2
+    )
+    assert (
+        len(
+            await administration_repository.list_web_subscription_notifications(
+                subscriber_identifier="web-alice", include_read=True, limit=10
+            )
+        )
+        == 3
+    )
+
+    # Отмечаются все непрочитанные записи Алисы в БД (2 оставшихся опубликованных + 1 переведённое в CANCELED)
+    marked_all = await administration_repository.mark_all_web_subscription_notifications_read(
+        subscriber_identifier="web-alice", read_at=base_time + timedelta(minutes=7)
+    )
+    assert marked_all == 3
+    assert (
+        await administration_repository.count_unread_web_subscription_notifications(subscriber_identifier="web-alice")
+        == 0
+    )
+    assert (
+        await administration_repository.count_unread_web_subscription_notifications(subscriber_identifier="web-bob")
+        == 3
+    )
+
+    # Физическое удаление подписки каскадно удаляет её уведомления (`ON DELETE CASCADE`)
+    await administration_repository.delete_subscription(
+        subscription_identifier=alice_sub.subscription_identifier, subscriber_identifier="web-alice"
+    )
+    async with database_engine_manager.session() as session:
+        alice_rows = (
+            (
+                await session.execute(
+                    select(SubscriptionNotificationRow).where(
+                        SubscriptionNotificationRow.subscriber_identifier == "web-alice"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert alice_rows == []
+
+        bob_rows_before = (
+            (
+                await session.execute(
+                    select(SubscriptionNotificationRow).where(
+                        SubscriptionNotificationRow.subscription_identifier == bob_sub.subscription_identifier
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(bob_rows_before) == 4
+
+    deleted_subs = await administration_repository.delete_all_subscriptions_for_subscriber(
+        channel=DialogChannel.WEB, subscriber_identifier="web-bob"
+    )
+    assert deleted_subs == 1
+    async with database_engine_manager.session() as session:
+        bob_rows_after = (
+            (
+                await session.execute(
+                    select(SubscriptionNotificationRow).where(
+                        SubscriptionNotificationRow.subscriber_identifier == "web-bob"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert bob_rows_after == []

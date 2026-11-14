@@ -15,6 +15,7 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from src.application._helpers import attach_default_timezone, resolve_duration_minutes
+from src.application.subscriptions import SubscriptionService
 from src.core.exceptions import ApplicationException, ValidationException
 from src.core.logger import get_logger
 from src.core.types import EventCategory, EventStatus, RealCollection, SourceType
@@ -102,6 +103,7 @@ class _IngestionCounters:
     items_sent_to_moderation: int = 0
     items_deduplicated: int = 0
     items_unchanged: int = 0
+    notifications_triggered: int = 0
     errors: list[str] | None = None
 
     def add_error(self, message: str) -> None:
@@ -136,6 +138,7 @@ class EventIngestionService:
         event_repository: EventRepositoryPort,
         administration_repository: AdministrationRepositoryPort,
         structured_extractor: StructuredExtractorPort | None = None,
+        subscription_service: SubscriptionService | None = None,
         confidence_threshold: float = 0.75,
         link_check_timeout_seconds: float = 4.0,
     ) -> None:
@@ -148,6 +151,7 @@ class EventIngestionService:
             event_repository: Порт каталога нормализованных мероприятий и справочников.
             administration_repository: Порт очереди модерации и журнала изменений.
             structured_extractor: Необязательный порт гибридного извлечения полей через языковую модель.
+            subscription_service: Необязательный сервис уведомлений по подпискам при публикации.
             confidence_threshold: Минимальный порог уверенности нормализации для автопубликации.
             link_check_timeout_seconds: Тайм-аут проверки доступности ссылки в секундах.
 
@@ -165,6 +169,7 @@ class EventIngestionService:
         self._event_repository = event_repository
         self._administration_repository = administration_repository
         self._structured_extractor = structured_extractor
+        self._subscription_service = subscription_service
         self._confidence_threshold = confidence_threshold
         self._link_check_timeout_seconds = link_check_timeout_seconds
 
@@ -247,6 +252,9 @@ class EventIngestionService:
                     batch_events_by_hash=batch_events_by_hash,
                 )
 
+        if counters.notifications_triggered > 0:
+            await self._dispatch_pending_notifications_safely(current_time=effective_time)
+
         return counters.to_report()
 
     async def reprocess_raw_events(
@@ -306,6 +314,9 @@ class EventIngestionService:
                 batch_events_by_identifier=batch_events_by_identifier,
                 batch_events_by_hash=batch_events_by_hash,
             )
+
+        if counters.notifications_triggered > 0:
+            await self._dispatch_pending_notifications_safely(current_time=effective_time)
 
         return counters.to_report()
 
@@ -729,7 +740,36 @@ class EventIngestionService:
                 created_at=current_time,
             )
         )
+        was_newly_published = (
+            existing_event is None or existing_event.status is not EventStatus.PUBLISHED
+        ) and saved_event.status is EventStatus.PUBLISHED
+        if was_newly_published and await self._enqueue_event_notifications_safely(
+            event=saved_event, current_time=current_time
+        ):
+            counters.notifications_triggered += 1
         return saved_event
+
+    async def _enqueue_event_notifications_safely(self, *, event: Event, current_time: datetime) -> bool:
+        if self._subscription_service is None:
+            return False
+        try:
+            await self._subscription_service.notify_subscribers_for_event(
+                event=event, dispatch_immediately=False, current_time=current_time
+            )
+            return True
+        except Exception as error:
+            logger.warning(
+                "Не удалось поставить в очередь уведомления по подпискам для события %s: %s", event.identifier, error
+            )
+            return False
+
+    async def _dispatch_pending_notifications_safely(self, *, current_time: datetime) -> None:
+        if self._subscription_service is None:
+            return
+        try:
+            await self._subscription_service.dispatch_pending_telegram_notifications(current_time=current_time)
+        except Exception as error:
+            logger.warning("Не удалось выполнить рассылку Telegram-уведомлений после сбора событий: %s", error)
 
     async def _apply_structured_extractor(
         self,

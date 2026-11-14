@@ -4,7 +4,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from src.domain.entities import (
     EventSearchFilter,
     EventSortField,
     SortDirection,
+    SubscriptionNotificationRecord,
     WeekendPlanRequest,
     WeekendPlanResult,
 )
@@ -53,6 +54,8 @@ _CATEGORY_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(
     (category.value, CATEGORY_LABELS[category]) for category in EventCategory
 )
 _PERIOD_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(PERIOD_LABELS.items())
+_CATALOG_NOTIFICATIONS_LIMIT = 3
+_SUBSCRIPTIONS_NOTIFICATIONS_LIMIT = 20
 
 
 def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
@@ -105,16 +108,20 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             return templates.TemplateResponse(
                 request=request,
                 name="partials/events_results.html",
-                context=_base_page_context(request=request, active_nav="catalog", **search_context),
+                context=await _base_page_context(request=request, active_nav="catalog", **search_context),
             )
 
+        existing_visitor = _read_existing_visitor_identifier(request)
+        subscription_notifications, unread_subscription_count = await _load_unread_notifications_state(
+            container=container, visitor_identifier=existing_visitor, limit=_CATALOG_NOTIFICATIONS_LIMIT
+        )
         cities = await container.search_service.list_cities()
         languages = await container.search_service.list_languages()
         language_options = tuple((language, language[:1].upper() + language[1:]) for language in languages)
         return templates.TemplateResponse(
             request=request,
             name="catalog.html",
-            context=_base_page_context(
+            context=await _base_page_context(
                 request=request,
                 active_nav="catalog",
                 cities=cities,
@@ -122,6 +129,10 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
                 period_options=_PERIOD_FILTER_CHIPS,
                 age_options=ALLOWED_AGE_OPTIONS,
                 language_options=language_options,
+                subscription_notifications=subscription_notifications,
+                unread_subscription_count=unread_subscription_count,
+                notification_surface="catalog",
+                notification_limit=_CATALOG_NOTIFICATIONS_LIMIT,
                 **search_context,
             ),
         )
@@ -172,7 +183,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             request=request,
             name="partials/events_results.html",
             headers={"HX-Push-Url": share_url},
-            context=_base_page_context(request=request, active_nav="catalog", **search_context),
+            context=await _base_page_context(request=request, active_nav="catalog", **search_context),
         )
 
     @router.get("/events/{event_identifier}", response_class=HTMLResponse)
@@ -186,7 +197,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
                 request=request,
                 name="not_found.html",
                 status_code=status.HTTP_404_NOT_FOUND,
-                context=_base_page_context(
+                context=await _base_page_context(
                     request=request,
                     active_nav="catalog",
                     missing_message="Мероприятие не найдено или находится на проверке модератором.",
@@ -202,7 +213,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         return templates.TemplateResponse(
             request=request,
             name="event_detail.html",
-            context=_base_page_context(
+            context=await _base_page_context(
                 request=request,
                 active_nav="catalog",
                 event=event,
@@ -220,16 +231,23 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         active_subscriptions = await container.subscription_service.list_subscriptions(
             channel=DialogChannel.WEB, subscriber_identifier=visitor_identifier
         )
+        subscription_notifications, unread_subscription_count = await _load_unread_notifications_state(
+            container=container, visitor_identifier=visitor_identifier, limit=_SUBSCRIPTIONS_NOTIFICATIONS_LIMIT
+        )
         response = templates.TemplateResponse(
             request=request,
             name="subscriptions.html",
-            context=_base_page_context(
+            context=await _base_page_context(
                 request=request,
                 active_nav="subscriptions",
                 visitor_identifier=visitor_identifier,
                 cities=cities,
                 category_options=_CATEGORY_FILTER_CHIPS,
                 subscriptions=active_subscriptions,
+                subscription_notifications=subscription_notifications,
+                unread_subscription_count=unread_subscription_count,
+                notification_surface="subscriptions",
+                notification_limit=_SUBSCRIPTIONS_NOTIFICATIONS_LIMIT,
                 notice_message=request.query_params.get("notice"),
                 error_message=request.query_params.get("error"),
             ),
@@ -267,7 +285,8 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             response: Response = templates.TemplateResponse(
                 request=request,
                 name="partials/subscriptions_list.html",
-                context=_base_page_context(
+                headers={"HX-Trigger": "subscriptionsChanged"},
+                context=await _base_page_context(
                     request=request,
                     active_nav="subscriptions",
                     subscriptions=active_subscriptions,
@@ -308,7 +327,8 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             response: Response = templates.TemplateResponse(
                 request=request,
                 name="partials/subscriptions_list.html",
-                context=_base_page_context(
+                headers={"HX-Trigger": "subscriptionsChanged"},
+                context=await _base_page_context(
                     request=request,
                     active_nav="subscriptions",
                     subscriptions=active_subscriptions,
@@ -339,7 +359,8 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             response: Response = templates.TemplateResponse(
                 request=request,
                 name="partials/subscriptions_list.html",
-                context=_base_page_context(
+                headers={"HX-Trigger": "subscriptionsChanged"},
+                context=await _base_page_context(
                     request=request, active_nav="subscriptions", subscriptions=(), notice_message=notice_message
                 ),
             )
@@ -350,6 +371,122 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         if should_set_cookie:
             _attach_visitor_cookie(response, visitor_identifier=visitor_identifier)
         return response
+
+    @router.get("/partials/subscription-notifications", response_class=HTMLResponse)
+    async def subscription_notifications_partial(
+        request: Request,
+        surface: Annotated[str, Query()] = "subscriptions",
+        limit: Annotated[int, Query(ge=1, le=50)] = _SUBSCRIPTIONS_NOTIFICATIONS_LIMIT,
+    ) -> HTMLResponse:
+        """Возвращает HTMX-фрагмент непрочитанных уведомлений по подпискам без создания новой cookie."""
+        container = _require_container(request)
+        resolved_surface = _normalize_notification_surface(surface)
+        visitor_identifier = _read_existing_visitor_identifier(request)
+        subscription_notifications, unread_subscription_count = await _load_unread_notifications_state(
+            container=container, visitor_identifier=visitor_identifier, limit=limit
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="partials/subscription_notifications.html",
+            context=await _base_page_context(
+                request=request,
+                active_nav="catalog" if resolved_surface == "catalog" else "subscriptions",
+                subscription_notifications=subscription_notifications,
+                unread_subscription_count=unread_subscription_count,
+                notification_surface=resolved_surface,
+                notification_limit=limit,
+                oob_nav_badge=request.headers.get("HX-Request") == "true",
+            ),
+        )
+
+    @router.post("/subscriptions/notifications/read-all", response_class=HTMLResponse)
+    async def mark_all_subscription_notifications_read_action(
+        request: Request,
+        surface: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1, le=50)] = None,
+    ) -> Response:
+        """Отмечает все непрочитанные веб-уведомления текущей сессии прочитанными."""
+        container = _require_container(request)
+        resolved_surface, resolved_limit = await _resolve_notification_view_params(
+            request=request, query_surface=surface, query_limit=limit
+        )
+        visitor_identifier = _read_existing_visitor_identifier(request)
+        marked_count = 0
+        if visitor_identifier is not None:
+            marked_count = await container.subscription_service.mark_all_web_notifications_read(
+                visitor_identifier=visitor_identifier
+            )
+
+        if request.headers.get("HX-Request") == "true":
+            subscription_notifications, unread_subscription_count = await _load_unread_notifications_state(
+                container=container, visitor_identifier=visitor_identifier, limit=resolved_limit
+            )
+            feedback_message = (
+                f"Отмечено прочитанными уведомлений: {marked_count}."
+                if marked_count > 0
+                else "Все уведомления уже прочитаны."
+            )
+            return templates.TemplateResponse(
+                request=request,
+                name="partials/subscription_notifications.html",
+                context=await _base_page_context(
+                    request=request,
+                    active_nav="catalog" if resolved_surface == "catalog" else "subscriptions",
+                    subscription_notifications=subscription_notifications,
+                    unread_subscription_count=unread_subscription_count,
+                    notification_surface=resolved_surface,
+                    notification_limit=resolved_limit,
+                    notification_feedback=feedback_message,
+                    oob_nav_badge=True,
+                ),
+            )
+
+        return RedirectResponse(
+            url=_notification_redirect_target(resolved_surface), status_code=status.HTTP_303_SEE_OTHER
+        )
+
+    @router.post("/subscriptions/notifications/{notification_identifier}/read", response_class=HTMLResponse)
+    async def mark_subscription_notification_read_action(
+        request: Request,
+        notification_identifier: UUID,
+        surface: Annotated[str | None, Query()] = None,
+        limit: Annotated[int | None, Query(ge=1, le=50)] = None,
+    ) -> Response:
+        """Отмечает одно веб-уведомление текущей сессии прочитанным."""
+        container = _require_container(request)
+        resolved_surface, resolved_limit = await _resolve_notification_view_params(
+            request=request, query_surface=surface, query_limit=limit
+        )
+        visitor_identifier = _read_existing_visitor_identifier(request)
+        marked = False
+        if visitor_identifier is not None:
+            marked = await container.subscription_service.mark_web_notification_read(
+                notification_identifier=notification_identifier, visitor_identifier=visitor_identifier
+            )
+
+        if request.headers.get("HX-Request") == "true":
+            subscription_notifications, unread_subscription_count = await _load_unread_notifications_state(
+                container=container, visitor_identifier=visitor_identifier, limit=resolved_limit
+            )
+            feedback_message = "Уведомление отмечено прочитанным." if marked else None
+            return templates.TemplateResponse(
+                request=request,
+                name="partials/subscription_notifications.html",
+                context=await _base_page_context(
+                    request=request,
+                    active_nav="catalog" if resolved_surface == "catalog" else "subscriptions",
+                    subscription_notifications=subscription_notifications,
+                    unread_subscription_count=unread_subscription_count,
+                    notification_surface=resolved_surface,
+                    notification_limit=resolved_limit,
+                    notification_feedback=feedback_message,
+                    oob_nav_badge=True,
+                ),
+            )
+
+        return RedirectResponse(
+            url=_notification_redirect_target(resolved_surface), status_code=status.HTTP_303_SEE_OTHER
+        )
 
     @router.post("/feedback", response_class=HTMLResponse)
     async def submit_feedback_action(
@@ -400,7 +537,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
                 request=request,
                 name="partials/feedback_result.html",
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT if error_message else status.HTTP_200_OK,
-                context=_base_page_context(
+                context=await _base_page_context(
                     request=request,
                     active_nav="subscriptions",
                     feedback_notice=notice_message,
@@ -423,7 +560,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         return templates.TemplateResponse(
             request=request,
             name="assistant.html",
-            context=_base_page_context(
+            context=await _base_page_context(
                 request=request,
                 active_nav="assistant",
                 quick_scenarios=(
@@ -500,7 +637,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             return templates.TemplateResponse(
                 request=request,
                 name="partials/planner_results.html",
-                context=_base_page_context(
+                context=await _base_page_context(
                     request=request,
                     active_nav="planner",
                     **weekend_dates,
@@ -513,7 +650,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
         return templates.TemplateResponse(
             request=request,
             name="planner.html",
-            context=_base_page_context(
+            context=await _base_page_context(
                 request=request,
                 active_nav="planner",
                 cities=cities,
@@ -586,7 +723,21 @@ def _require_container(request: Request) -> ApplicationContainer:
     return container
 
 
-def _base_page_context(*, request: Request, active_nav: str, **extra: Any) -> dict[str, Any]:
+async def _base_page_context(*, request: Request, active_nav: str, **extra: Any) -> dict[str, Any]:
+    unread_subscription_count = extra.get("unread_subscription_count")
+    if unread_subscription_count is None:
+        existing_visitor = _read_existing_visitor_identifier(request)
+        if existing_visitor is not None:
+            container = getattr(request.app.state, "container", None)
+            if isinstance(container, ApplicationContainer):
+                unread_subscription_count = await container.subscription_service.count_unread_web_notifications(
+                    visitor_identifier=existing_visitor
+                )
+            else:
+                unread_subscription_count = 0
+        else:
+            unread_subscription_count = 0
+
     context: dict[str, Any] = {
         "request": request,
         "active_nav": active_nav,
@@ -597,6 +748,8 @@ def _base_page_context(*, request: Request, active_nav: str, **extra: Any) -> di
         "format_price": format_price_label,
         "format_date_range": format_date_range_label,
         "format_status": format_status_label,
+        "format_notification_time": _format_notification_time,
+        "unread_subscription_count": unread_subscription_count,
         "current_year": datetime.now().year,
     }
     context.update(extra)
@@ -809,9 +962,16 @@ def _build_active_filter_chips(parameters: CatalogQueryParameters) -> tuple[dict
     return tuple(chips)
 
 
-def _resolve_visitor_identifier(request: Request) -> tuple[str, bool]:
+def _read_existing_visitor_identifier(request: Request) -> str | None:
     existing_cookie = normalize_optional_text(request.cookies.get(VISITOR_COOKIE_NAME))
     if existing_cookie is not None and len(existing_cookie) <= 120:
+        return existing_cookie
+    return None
+
+
+def _resolve_visitor_identifier(request: Request) -> tuple[str, bool]:
+    existing_cookie = _read_existing_visitor_identifier(request)
+    if existing_cookie is not None:
         return existing_cookie, False
     return generate_visitor_identifier(), True
 
@@ -820,6 +980,65 @@ def _attach_visitor_cookie(response: Response, *, visitor_identifier: str) -> No
     response.set_cookie(
         key=VISITOR_COOKIE_NAME, value=visitor_identifier, max_age=60 * 60 * 24 * 180, httponly=True, samesite="lax"
     )
+
+
+def _normalize_notification_surface(raw_surface: str | None) -> Literal["catalog", "subscriptions"]:
+    cleaned = normalize_optional_text(raw_surface)
+    if cleaned == "catalog":
+        return "catalog"
+    return "subscriptions"
+
+
+def _notification_redirect_target(surface: Literal["catalog", "subscriptions"]) -> str:
+    return "/" if surface == "catalog" else "/subscriptions"
+
+
+async def _resolve_notification_view_params(
+    *, request: Request, query_surface: str | None, query_limit: int | None
+) -> tuple[Literal["catalog", "subscriptions"], int]:
+    form_surface: str | None = None
+    form_limit: int | None = None
+    content_type = request.headers.get("content-type", "")
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form_data = await request.form()
+        raw_surface = form_data.get("surface")
+        if isinstance(raw_surface, str):
+            form_surface = raw_surface
+        raw_limit = form_data.get("limit")
+        if isinstance(raw_limit, str):
+            form_limit = _parse_optional_query_int(raw_limit)
+
+    resolved_surface = _normalize_notification_surface(query_surface or form_surface)
+    default_limit = (
+        _CATALOG_NOTIFICATIONS_LIMIT if resolved_surface == "catalog" else _SUBSCRIPTIONS_NOTIFICATIONS_LIMIT
+    )
+    resolved_limit = query_limit if query_limit is not None else (form_limit or default_limit)
+    return resolved_surface, min(50, max(1, resolved_limit))
+
+
+async def _load_unread_notifications_state(
+    *, container: ApplicationContainer, visitor_identifier: str | None, limit: int
+) -> tuple[tuple[SubscriptionNotificationRecord, ...], int]:
+    if visitor_identifier is None:
+        return (), 0
+    unread_count = await container.subscription_service.count_unread_web_notifications(
+        visitor_identifier=visitor_identifier
+    )
+    if unread_count <= 0:
+        return (), 0
+    notifications = await container.subscription_service.list_web_notifications(
+        visitor_identifier=visitor_identifier, include_read=False, limit=limit
+    )
+    return notifications, unread_count
+
+
+def _format_notification_time(moment: datetime) -> str:
+    local_moment = (
+        moment.replace(tzinfo=BASHKORTOSTAN_TIMEZONE)
+        if moment.tzinfo is None
+        else moment.astimezone(BASHKORTOSTAN_TIMEZONE)
+    )
+    return local_moment.strftime("%d.%m.%Y %H:%M (+05:00)")
 
 
 _PLANNER_QUERY_KEYS: tuple[str, ...] = (
@@ -907,7 +1126,7 @@ async def _render_planner_partial(
         request=request,
         name="partials/planner_results.html",
         headers={"HX-Push-Url": str(plan_context["share_url"])},
-        context=_base_page_context(
+        context=await _base_page_context(
             request=request,
             active_nav="planner",
             **weekend_dates,

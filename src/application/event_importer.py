@@ -10,7 +10,9 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from src.application._helpers import attach_default_timezone, resolve_duration_minutes, validate_http_url
+from src.application.subscriptions import SubscriptionService
 from src.core.exceptions import DomainException
+from src.core.logger import get_logger
 from src.core.types import EventStatus, RealCollection, SourceType
 from src.domain.entities import (
     AuditLogEntry,
@@ -46,6 +48,8 @@ from src.domain.services import (
 )
 
 __all__ = ["EventImportService"]
+
+logger = get_logger(__name__)
 
 type ImportFormat = Literal["csv", "json"]
 
@@ -159,15 +163,18 @@ class EventImportService:
         *,
         event_repository: EventRepositoryPort,
         administration_repository: AdministrationRepositoryPort | None = None,
+        subscription_service: SubscriptionService | None = None,
     ) -> None:
         """Инициализирует сервис импорта с репозиториями каталога и администрирования.
 
         Arguments:
             event_repository: Реализация порта каталога мероприятий.
             administration_repository: Необязательный порт для постановки в модерацию и записи аудита.
+            subscription_service: Необязательный сервис уведомлений по подпискам при публикации.
         """
         self._event_repository = event_repository
         self._administration_repository = administration_repository
+        self._subscription_service = subscription_service
 
     async def import_events(
         self,
@@ -229,6 +236,7 @@ class EventImportService:
         rows_updated = 0
         rows_skipped_unchanged = 0
         failures: list[ImportRowFailure] = []
+        published_events: list[Event] = []
         batch_events_by_identifier: dict[UUID, Event] = {}
         batch_events_by_hash: dict[str, Event] = {}
 
@@ -273,7 +281,7 @@ class EventImportService:
                 )
                 continue
 
-            outcome, saved_event = await self._persist_or_merge_record(
+            outcome, saved_event, was_newly_published = await self._persist_or_merge_record(
                 parsed_record=parsed_record,
                 current_time=current_time,
                 batch_events_by_identifier=batch_events_by_identifier,
@@ -285,6 +293,8 @@ class EventImportService:
                 batch_events_by_hash[parsed_record.candidate_event.source_hash] = saved_event
                 for source_reference in saved_event.sources:
                     batch_events_by_hash[source_reference.source_hash] = saved_event
+                if was_newly_published:
+                    published_events.append(saved_event)
 
             if outcome == "added":
                 rows_added += 1
@@ -322,6 +332,9 @@ class EventImportService:
                 )
             )
 
+        if published_events:
+            await self._notify_published_events_safely(published_events=published_events, current_time=current_time)
+
         return report
 
     async def _persist_or_merge_record(
@@ -331,7 +344,7 @@ class EventImportService:
         current_time: datetime,
         batch_events_by_identifier: Mapping[UUID, Event],
         batch_events_by_hash: Mapping[str, Event],
-    ) -> tuple[Literal["added", "updated", "skipped"], Event | None]:
+    ) -> tuple[Literal["added", "updated", "skipped"], Event | None, bool]:
         candidate = parsed_record.candidate_event
 
         existing_event = await self._find_existing_event(
@@ -345,10 +358,10 @@ class EventImportService:
             await self._enqueue_injection_moderation_if_needed(
                 parsed_record=parsed_record, saved_event=saved_event, current_time=current_time
             )
-            return "added", saved_event
+            return "added", saved_event, saved_event.status is EventStatus.PUBLISHED
 
         if _is_unchanged_import_match(existing_event=existing_event, candidate=candidate):
-            return "skipped", existing_event
+            return "skipped", existing_event, False
 
         is_same_source = existing_event.source_url == candidate.source_url or (
             parsed_record.explicit_identifier is not None
@@ -393,7 +406,34 @@ class EventImportService:
         await self._enqueue_injection_moderation_if_needed(
             parsed_record=parsed_record, saved_event=saved_event, current_time=current_time
         )
-        return "updated", saved_event
+        was_newly_published = (
+            existing_event.status is not EventStatus.PUBLISHED and saved_event.status is EventStatus.PUBLISHED
+        )
+        return "updated", saved_event, was_newly_published
+
+    async def _notify_published_events_safely(
+        self, *, published_events: Sequence[Event], current_time: datetime
+    ) -> None:
+        if self._subscription_service is None:
+            return
+        enqueued_any = False
+        for published_event in published_events:
+            try:
+                await self._subscription_service.notify_subscribers_for_event(
+                    event=published_event, dispatch_immediately=False, current_time=current_time
+                )
+                enqueued_any = True
+            except Exception as error:
+                logger.warning(
+                    "Не удалось поставить в очередь уведомления по подпискам для импортированного события %s: %s",
+                    published_event.identifier,
+                    error,
+                )
+        if enqueued_any:
+            try:
+                await self._subscription_service.dispatch_pending_telegram_notifications(current_time=current_time)
+            except Exception as error:
+                logger.warning("Не удалось выполнить рассылку Telegram-уведомлений после импорта: %s", error)
 
     async def _find_existing_event(
         self,

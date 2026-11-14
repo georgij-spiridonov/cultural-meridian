@@ -11,7 +11,9 @@ from src.application._helpers import (
     resolve_normalized_city,
     validate_http_url,
 )
+from src.application.subscriptions import SubscriptionService
 from src.core.exceptions import ValidationException
+from src.core.logger import get_logger
 from src.core.types import EventCategory, EventStatus, RealCollection, SourceType
 from src.domain.entities import (
     AuditLogEntry,
@@ -37,6 +39,8 @@ from src.domain.services import (
 )
 
 __all__ = ["AdministrationService", "ManualEventInput"]
+
+logger = get_logger(__name__)
 
 _ALLOWED_AGE_LIMITS = frozenset({0, 6, 12, 16, 18})
 _MAXIMUM_LIST_LIMIT = 500
@@ -97,16 +101,22 @@ class AdministrationService:
     """Прикладной сценарий управления карточками событий, модерацией и аудитом."""
 
     def __init__(
-        self, *, event_repository: EventRepositoryPort, administration_repository: AdministrationRepositoryPort
+        self,
+        *,
+        event_repository: EventRepositoryPort,
+        administration_repository: AdministrationRepositoryPort,
+        subscription_service: SubscriptionService | None = None,
     ) -> None:
         """Инициализирует сервис администрирования каталога.
 
         Arguments:
             event_repository: Реализация порта каталога мероприятий.
             administration_repository: Реализация порта модерации и аудита.
+            subscription_service: Необязательный сервис уведомлений по подпискам при публикации.
         """
         self._event_repository = event_repository
         self._administration_repository = administration_repository
+        self._subscription_service = subscription_service
 
     async def list_events(
         self,
@@ -189,6 +199,8 @@ class AdministrationService:
                 created_at=current_time,
             )
         )
+        if saved_event.status is EventStatus.PUBLISHED:
+            await self._notify_subscribers_safely(event=saved_event, current_time=current_time)
         return saved_event
 
     async def update_manual_event(self, *, event_identifier: UUID, event_input: ManualEventInput, actor: str) -> Event:
@@ -235,6 +247,8 @@ class AdministrationService:
                 created_at=current_time,
             )
         )
+        if existing_event.status is not EventStatus.PUBLISHED and saved_event.status is EventStatus.PUBLISHED:
+            await self._notify_subscribers_safely(event=saved_event, current_time=current_time)
         return saved_event
 
     async def cancel_event(self, *, event_identifier: UUID, actor: str, reason: str | None = None) -> Event:
@@ -434,6 +448,12 @@ class AdministrationService:
                 created_at=current_time,
             )
         )
+        if (
+            decision == "approved"
+            and linked_event.status is not EventStatus.PUBLISHED
+            and saved_event.status is EventStatus.PUBLISHED
+        ):
+            await self._notify_subscribers_safely(event=saved_event, current_time=current_time)
         return resolved_item, saved_event
 
     async def list_audit_logs(
@@ -455,6 +475,18 @@ class AdministrationService:
             raise ValidationException(f"Лимит выборки журнала изменений должен быть от 1 до {_MAXIMUM_LIST_LIMIT}.")
         cleaned_entity = normalize_optional_text(entity_identifier)
         return await self._administration_repository.list_audit_logs(entity_identifier=cleaned_entity, limit=limit)
+
+    async def _notify_subscribers_safely(self, *, event: Event, current_time: datetime) -> None:
+        if self._subscription_service is None:
+            return
+        try:
+            await self._subscription_service.notify_subscribers_for_event(
+                event=event, dispatch_immediately=True, current_time=current_time
+            )
+        except Exception as error:
+            logger.warning(
+                "Не удалось выполнить уведомление подписчиков при публикации события %s: %s", event.identifier, error
+            )
 
     async def _build_event_from_manual_input(
         self,

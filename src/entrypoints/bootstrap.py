@@ -43,6 +43,7 @@ from src.infrastructure.database import (
 )
 from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor, create_openai_client
+from src.infrastructure.notifications import TelegramSubscriptionNotificationSender
 from src.infrastructure.sources import CompositeSourceFetcher, HttpLinkChecker
 
 __all__ = ["ApplicationContainer", "build_application_container"]
@@ -81,6 +82,7 @@ class ApplicationContainer:
         source_fetcher: Маршрутизирующий загрузчик внешних и локальных источников (RSS, JSON, HTML).
         link_checker: Адаптер проверки доступности ссылок на первоисточники.
         event_ingestion_service: Прикладной конвейер сбора, гибридной нормализации и дедупликации.
+        telegram_notification_sender: Адаптер доставки уведомлений по подпискам в Telegram (или `None`).
     """
 
     application_settings: ApplicationSettings
@@ -109,6 +111,7 @@ class ApplicationContainer:
     source_fetcher: CompositeSourceFetcher | None = None
     link_checker: HttpLinkChecker | None = None
     event_ingestion_service: EventIngestionService | None = None
+    telegram_notification_sender: TelegramSubscriptionNotificationSender | None = None
     _openai_client: AsyncOpenAI | None = field(default=None, repr=False)
 
     async def startup(self) -> None:
@@ -118,7 +121,9 @@ class ApplicationContainer:
         logger.info("Контейнер зависимостей приложения запущен.")
 
     async def shutdown(self) -> None:
-        """Корректно закрывает подключения к БД, сборщику, проверщику ссылок, геокодеру и LLM-клиенту."""
+        """Корректно закрывает подключения к БД, сборщику, проверщику ссылок, уведомлениям, геокодеру и LLM."""
+        if self.telegram_notification_sender is not None:
+            await self.telegram_notification_sender.close()
         if self.source_fetcher is not None:
             await self.source_fetcher.close()
         if self.link_checker is not None:
@@ -201,6 +206,23 @@ def build_application_container(
         local_feeds_directory=resolved_ingestion_settings.LOCAL_FEEDS_DIRECTORY,
         verify_local_file_links=resolved_ingestion_settings.VERIFY_LOCAL_FILE_LINKS,
     )
+    telegram_notification_sender: TelegramSubscriptionNotificationSender | None = None
+    bot_token = resolved_telegram_settings.BOT_TOKEN.strip()
+    if bot_token:
+        telegram_notification_sender = TelegramSubscriptionNotificationSender(
+            bot_token=bot_token,
+            public_web_base_url=resolved_telegram_settings.PUBLIC_WEB_BASE_URL,
+            request_timeout_seconds=resolved_telegram_settings.NOTIFICATION_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    subscription_service = SubscriptionService(
+        administration_repository=administration_repository,
+        event_repository=event_repository,
+        telegram_notification_sender=telegram_notification_sender,
+        notification_batch_size=resolved_telegram_settings.NOTIFICATION_BATCH_SIZE,
+        notification_max_attempts=resolved_telegram_settings.NOTIFICATION_MAX_ATTEMPTS,
+    )
+
     event_ingestion_service = EventIngestionService(
         source_fetcher=source_fetcher,
         link_checker=link_checker,
@@ -208,19 +230,21 @@ def build_application_container(
         event_repository=event_repository,
         administration_repository=administration_repository,
         structured_extractor=structured_extractor if resolved_ingestion_settings.HYBRID_LLM_ENABLED else None,
+        subscription_service=subscription_service,
         confidence_threshold=resolved_ingestion_settings.CONFIDENCE_THRESHOLD,
         link_check_timeout_seconds=resolved_ingestion_settings.LINK_CHECK_TIMEOUT_SECONDS,
     )
 
     search_service = EventSearchService(event_repository=event_repository)
     import_service = EventImportService(
-        event_repository=event_repository, administration_repository=administration_repository
-    )
-    subscription_service = SubscriptionService(
-        administration_repository=administration_repository, event_repository=event_repository
+        event_repository=event_repository,
+        administration_repository=administration_repository,
+        subscription_service=subscription_service,
     )
     administration_service = AdministrationService(
-        event_repository=event_repository, administration_repository=administration_repository
+        event_repository=event_repository,
+        administration_repository=administration_repository,
+        subscription_service=subscription_service,
     )
     weekend_planner = WeekendPlannerService(
         event_repository=event_repository, geolocation_resolver=geolocation_resolver
@@ -267,5 +291,6 @@ def build_application_container(
         source_fetcher=source_fetcher,
         link_checker=link_checker,
         event_ingestion_service=event_ingestion_service,
+        telegram_notification_sender=telegram_notification_sender,
         _openai_client=openai_client,
     )

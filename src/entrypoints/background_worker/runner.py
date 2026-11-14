@@ -15,7 +15,7 @@ from uuid import uuid4
 from src.application.event_ingestion import EventIngestionService
 from src.core.exceptions import ApplicationException, LifecycleClientNotInitializedError, ValidationException
 from src.core.logger import get_logger, reset_request_identifier, set_request_identifier
-from src.domain.entities import IngestionReport
+from src.domain.entities import IngestionReport, NotificationDispatchReport
 from src.domain.ports import RawNormalizationStatus
 from src.entrypoints.bootstrap import ApplicationContainer, build_application_container
 from src.infrastructure.sources import load_sources_registry
@@ -128,6 +128,16 @@ class BackgroundWorkerRunner:
             demoted_count = await ingestion_service.verify_published_links(current_time=current_time)
             logger.info("Проверка ссылок опубликованных карточек завершена: снято_в_черновик=%s.", demoted_count)
 
+        subscription_service = getattr(self._container, "subscription_service", None)
+        if subscription_service is not None:
+            try:
+                dispatch_report = await subscription_service.dispatch_pending_telegram_notifications(
+                    current_time=current_time
+                )
+                _log_notification_dispatch_report(report=dispatch_report)
+            except Exception as error:
+                logger.warning("Ошибка фоновой рассылки Telegram-уведомлений по подпискам: %s", error)
+
         return report
 
     async def run_forever(
@@ -183,6 +193,17 @@ def _log_ingestion_report(*, stage: str, report: IngestionReport) -> None:
     )
     for error_message in report.errors:
         logger.warning("Диагностика этапа '%s': %s", stage, error_message)
+
+
+def _log_notification_dispatch_report(*, report: NotificationDispatchReport) -> None:
+    """Записывает сводку рассылки Telegram-уведомлений по подпискам в журнал приложения."""
+    logger.info(
+        "Рассылка Telegram-уведомлений по подпискам: attempted=%s, sent=%s, deferred=%s, failed=%s.",
+        report.attempted_count,
+        report.sent_count,
+        report.deferred_count,
+        report.failed_count,
+    )
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

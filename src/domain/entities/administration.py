@@ -13,6 +13,7 @@ from src.domain.entities._helpers import (
     restore_dataclass_state,
     serialize_dataclass_state,
 )
+from src.domain.entities.events import Event
 
 __all__ = [
     "AuditLogEntry",
@@ -21,11 +22,15 @@ __all__ = [
     "ModerationItem",
     "ModerationStatus",
     "ModeratorAccount",
+    "NotificationDispatchReport",
+    "SubscriptionNotificationRecord",
+    "SubscriptionNotificationStatus",
     "SubscriptionRecord",
 ]
 
 type ModerationStatus = Literal["pending", "approved", "rejected"]
 type FeedbackStatus = Literal["new", "reviewed"]
+type SubscriptionNotificationStatus = Literal["pending", "sending", "sent", "failed", "read"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -161,3 +166,57 @@ class FeedbackRequestRecord:
     contact_hint: str | None = None
     created_at: datetime
     status: FeedbackStatus = "new"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SubscriptionNotificationRecord:
+    """Персистентная запись уведомления подписчику о новом опубликованном мероприятии.
+
+    Attributes:
+        notification_identifier: Уникальный идентификатор записи уведомления.
+        subscription_identifier: Идентификатор сработавшей подписки пользователя.
+        channel: Канал доставки уведомления (`web`, `telegram` или `evaluation`).
+        subscriber_identifier: Технический идентификатор получателя в канале.
+        event: Опубликованная карточка мероприятия, по которой сформировано уведомление.
+        status: Текущий статус жизненного цикла уведомления (`pending`, `sending`, `sent`, `failed`, `read`).
+        attempts: Количество выполненных попыток внешней доставки.
+        last_error: Текст последней ошибки доставки, если попытка завершилась неудачно.
+        next_retry_at: Временная метка следующей разрешённой попытки доставки.
+        created_at: Временная метка постановки уведомления в очередь.
+        updated_at: Временная метка последнего изменения состояния уведомления.
+        sent_at: Временная метка успешной внешней доставки (для Telegram).
+        read_at: Временная метка прочтения уведомления пользователем (для веб-кабинета).
+    """
+
+    notification_identifier: UUID
+    subscription_identifier: UUID
+    channel: DialogChannel
+    subscriber_identifier: str
+    event: Event
+    status: SubscriptionNotificationStatus = "pending"
+    attempts: int = 0
+    last_error: str | None = None
+    next_retry_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    sent_at: datetime | None = None
+    read_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class NotificationDispatchReport:
+    """Сводный отчёт о постановке в очередь или пакетной рассылке уведомлений по подпискам.
+
+    Attributes:
+        enqueued_count: Количество новых уведомлений, поставленных в очередь.
+        attempted_count: Количество уведомлений, взятых в обработку для отправки.
+        sent_count: Количество успешно доставленных уведомлений.
+        failed_count: Количество уведомлений, переведённых в окончательный статус `failed`.
+        deferred_count: Количество уведомлений, отложенных для повторной попытки позже.
+    """
+
+    enqueued_count: int = 0
+    attempted_count: int = 0
+    sent_count: int = 0
+    failed_count: int = 0
+    deferred_count: int = 0

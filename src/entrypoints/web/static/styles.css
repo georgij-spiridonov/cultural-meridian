@@ -201,6 +201,7 @@ a:hover {
 .primary-nav__link {
   display: inline-flex;
   align-items: center;
+  gap: 6px;
   padding: 7px 12px;
   border-radius: var(--radius-sm);
   text-decoration: none;
@@ -209,6 +210,26 @@ a:hover {
   color: var(--ink-secondary);
   border: 1px solid transparent;
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background-color: var(--brand-primary);
+  color: #ffffff;
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.nav-badge[hidden] {
+  display: none;
 }
 
 .primary-nav__link:hover {
@@ -1304,4 +1325,176 @@ dialog::backdrop {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* Новые уведомления по подпискам */
+.sub-notifications {
+  background: linear-gradient(135deg, var(--surface-card) 0%, var(--surface-tint) 100%);
+  border: 1px solid #b7d2ca;
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-card);
+}
+
+.sub-notifications--catalog {
+  padding: 16px 18px;
+}
+
+.sub-notifications--empty-slot {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sub-notifications__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  margin-bottom: 14px;
+}
+
+.sub-notifications__title-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.sub-notifications__title {
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.25;
+}
+
+.sub-notifications__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sub-notifications__feedback {
+  margin-bottom: 14px;
+}
+
+.sub-notifications__empty {
+  margin-bottom: 0;
+}
+
+.sub-notifications__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+
+@media (min-width: 680px) {
+  .sub-notifications__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1040px) {
+  .sub-notifications__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.sub-notification-card {
+  min-width: 0;
+  background-color: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.sub-notifications--catalog .sub-notification-card {
+  padding: 14px;
+}
+
+.sub-notification-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(20, 32, 29, 0.09);
+  border-color: var(--border-strong);
+}
+
+.sub-notification-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sub-notification-card__title {
+  margin: 0 0 8px;
+  font-size: 1.04rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.sub-notification-card__title a {
+  color: var(--ink-primary);
+  text-decoration: none;
+}
+
+.sub-notification-card__title a:hover {
+  color: var(--brand-primary);
+  text-decoration: underline;
+}
+
+.sub-notification-card__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--surface-muted);
+}
+
+.sub-notification-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 639px) {
+  .sub-notifications {
+    padding: 14px;
+  }
+
+  .sub-notifications__actions {
+    width: 100%;
+  }
+
+  .sub-notification-card__actions {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-nav__link,
+  .button,
+  .event-card,
+  .sub-notification-card,
+  dialog {
+    transition: none;
+  }
+
+  .button:active,
+  .event-card:hover,
+  .sub-notification-card:hover {
+    transform: none;
+  }
 }

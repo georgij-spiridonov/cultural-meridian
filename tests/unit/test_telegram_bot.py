@@ -45,6 +45,7 @@ from src.domain.entities import (
     ModerationItem,
     ModerationStatus,
     PendingAction,
+    SubscriptionNotificationRecord,
     SubscriptionRecord,
     UsageBudgetStatus,
     VenueReference,
@@ -57,7 +58,7 @@ from src.domain.exceptions import (
     PendingActionNotFoundError,
     SubscriptionNotFoundError,
 )
-from src.domain.ports import AgentToolCallbacks
+from src.domain.ports import AdministrationRepositoryPort, AgentToolCallbacks
 from src.domain.services import BASHKORTOSTAN_TIMEZONE, compute_deduplication_key, normalize_title
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.telegram_bot._search_parser import parse_search_query_to_filter
@@ -329,6 +330,61 @@ class _AdministrationRepositoryStub:
         del entity_identifier, limit
         return ()
 
+    async def enqueue_subscription_notifications_for_event(self, *, event: Event, created_at: datetime) -> int:
+        """Заглушка постановки уведомлений по подпискам."""
+        del event, created_at
+        return 0
+
+    async def claim_pending_telegram_notifications(
+        self, *, current_time: datetime, limit: int = 50, maximum_attempts: int = 3, stale_after_seconds: int = 300
+    ) -> tuple[SubscriptionNotificationRecord, ...]:
+        """Заглушка резервирования Telegram-уведомлений."""
+        del current_time, limit, maximum_attempts, stale_after_seconds
+        return ()
+
+    async def mark_subscription_notification_sent(self, *, notification_identifier: UUID, sent_at: datetime) -> None:
+        """Заглушка фиксации доставки уведомления."""
+        del notification_identifier, sent_at
+
+    async def mark_subscription_notification_failed(
+        self,
+        *,
+        notification_identifier: UUID,
+        error_message: str,
+        failed_at: datetime,
+        retry_at: datetime | None = None,
+        is_permanent: bool = False,
+        maximum_attempts: int = 3,
+    ) -> None:
+        """Заглушка фиксации ошибки доставки уведомления."""
+        del notification_identifier, error_message, failed_at, retry_at, is_permanent, maximum_attempts
+
+    async def count_unread_web_subscription_notifications(self, *, subscriber_identifier: str) -> int:
+        """Заглушка подсчёта непрочитанных веб-уведомлений."""
+        del subscriber_identifier
+        return 0
+
+    async def list_web_subscription_notifications(
+        self, *, subscriber_identifier: str, include_read: bool = False, limit: int = 20
+    ) -> tuple[SubscriptionNotificationRecord, ...]:
+        """Заглушка чтения списка веб-уведомлений."""
+        del subscriber_identifier, include_read, limit
+        return ()
+
+    async def mark_web_subscription_notification_read(
+        self, *, notification_identifier: UUID, subscriber_identifier: str, read_at: datetime
+    ) -> bool:
+        """Заглушка отметки веб-уведомления прочитанным."""
+        del notification_identifier, subscriber_identifier, read_at
+        return False
+
+    async def mark_all_web_subscription_notifications_read(
+        self, *, subscriber_identifier: str, read_at: datetime
+    ) -> int:
+        """Заглушка массовой отметки веб-уведомлений прочитанными."""
+        del subscriber_identifier, read_at
+        return 0
+
 
 class _DialogRepositoryStub:
     """Локальный стаб памяти диалогов и двухшаговых подтверждений."""
@@ -579,6 +635,7 @@ def _build_bot_test_context(
     )
     event_repository = _EventRepositoryStub(events=events, cities=cities)
     administration_repository = _AdministrationRepositoryStub()
+    assert isinstance(administration_repository, AdministrationRepositoryPort)
     dialog_repository = _DialogRepositoryStub()
 
     container = MagicMock(spec=ApplicationContainer)
@@ -1649,6 +1706,7 @@ def _build_ai_bot_test_context(
     )
     event_repository = _EventRepositoryStub(events=events, cities=cities)
     administration_repository = _AdministrationRepositoryStub()
+    assert isinstance(administration_repository, AdministrationRepositoryPort)
     dialog_repository = _DialogRepositoryStub()
     search_service = EventSearchService(event_repository=event_repository)
     subscription_service = SubscriptionService(
