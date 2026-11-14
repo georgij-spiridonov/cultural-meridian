@@ -48,6 +48,7 @@ __all__ = [
     "ModeratorRow",
     "PendingActionRow",
     "RawEventRow",
+    "SubscriptionNotificationRow",
     "SubscriptionRow",
     "TagRow",
     "VenueAliasRow",
@@ -570,6 +571,51 @@ class SubscriptionRow(DatabaseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
     city: Mapped[CityRow | None] = relationship(lazy="raise")
+
+
+class SubscriptionNotificationRow(DatabaseBase):
+    """Очередь и журнал уведомлений подписчикам о новых опубликованных мероприятиях."""
+
+    __tablename__ = "subscription_notifications"
+    __table_args__ = (
+        UniqueConstraint("channel", "subscriber_identifier", "event_identifier", name="target_event"),
+        CheckConstraint("channel IN ('web', 'telegram', 'evaluation')", name="channel_allowed"),
+        CheckConstraint("btrim(subscriber_identifier) <> ''", name="subscriber_non_empty"),
+        CheckConstraint("status IN ('pending', 'sending', 'sent', 'failed', 'read')", name="status_allowed"),
+        CheckConstraint("attempts >= 0", name="attempts_non_negative"),
+        Index("ix_subscription_notifications_pending_dispatch", "channel", "status", "next_retry_at", "created_at"),
+        Index(
+            "ix_subscription_notifications_web_inbox",
+            "channel",
+            "subscriber_identifier",
+            "status",
+            text("created_at DESC"),
+        ),
+        Index("ix_subscription_notifications_subscription_identifier", "subscription_identifier"),
+        Index("ix_subscription_notifications_event_identifier", "event_identifier"),
+    )
+
+    identifier: Mapped[UUID] = mapped_column(
+        POSTGRESQL_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    subscription_identifier: Mapped[UUID] = mapped_column(
+        POSTGRESQL_UUID(as_uuid=True), ForeignKey("subscriptions.identifier", ondelete="CASCADE"), nullable=False
+    )
+    event_identifier: Mapped[UUID] = mapped_column(
+        POSTGRESQL_UUID(as_uuid=True), ForeignKey("events.identifier", ondelete="CASCADE"), nullable=False
+    )
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    subscriber_identifier: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    event: Mapped[EventRow] = relationship(lazy="raise")
 
 
 class FeedbackRequestRow(DatabaseBase):
