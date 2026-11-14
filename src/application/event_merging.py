@@ -17,11 +17,27 @@ _MAXIMUM_SEARCH_CANDIDATES: Final[int] = 500
 _SEARCHABLE_STATUSES: Final[tuple[EventStatus, ...]] = (EventStatus.PUBLISHED, EventStatus.DRAFT, EventStatus.CANCELED)
 
 
+def _is_separate_session_of_same_source(existing: Event, *, candidate: Event) -> bool:
+    """Проверяет, что поступающая запись — другой сеанс, который тот же источник перечислил отдельно.
+
+    Если у существующего мероприятия уже есть упоминание того же источника, но с другим адресом
+    страницы, источник сам считает эти записи разными показами (например, сеансы в 14:00 и 15:00).
+    """
+    for incoming in candidate.sources:
+        same_source_urls = {
+            reference.source_url for reference in existing.sources if reference.source_name == incoming.source_name
+        }
+        if same_source_urls and incoming.source_url not in same_source_urls:
+            return True
+    return False
+
+
 def is_duplicate_of(existing: Event, *, candidate: Event) -> bool:
     """Проверяет, описывает ли поступающее мероприятие уже существующее.
 
     Решение принимает доменное правило `are_events_duplicates`: тот же город,
     тот же локальный календарный день, допуск по времени начала и сходство названий и площадок.
+    Правило не применяется к сеансам, которые один и тот же источник публикует на разных страницах.
 
     Arguments:
         existing: Мероприятие, уже сохранённое в каталоге или в текущем пакете.
@@ -30,6 +46,8 @@ def is_duplicate_of(existing: Event, *, candidate: Event) -> bool:
     Returns:
         `True`, если поступающее мероприятие является дублем существующего.
     """
+    if _is_separate_session_of_same_source(existing, candidate=candidate):
+        return False
     verdict = are_events_duplicates(
         existing,
         normalized_title=candidate.normalized_title,

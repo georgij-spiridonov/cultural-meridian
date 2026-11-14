@@ -52,18 +52,64 @@ sources:
     is_enabled: false
     request_timeout_seconds: 6.0
 
-  - name: bashopera_repertoire_html
+  # Реальные сайты учреждений культуры с именными парсерами разметки.
+  # default_venue — площадка в том виде, как она названа в configuration/venues_coordinates.yaml;
+  # она подставляется только для мероприятий в городе источника, гастроли уходят в модерацию.
+
+  # Ссылки /afisha/ и /robots.txt перенаправляют на главную; блок «Афиша» находится на главной странице.
+  - name: bashopera-ufa
     source_type: webpage
-    source_url: https://www.bashopera.ru/repertoire/
+    source_url: https://bashopera.ru/
     default_city: Уфа
     default_category: spectacle
-    is_enabled: false
-    request_timeout_seconds: 6.0
+    default_venue: Башкирский государственный театр оперы и балета
+    is_enabled: true
+    request_timeout_seconds: 10.0
+    parser:
+      name: bashopera
 
-  - name: bashgf_afisha_html
+  - name: bashgf-ufa
     source_type: webpage
     source_url: https://bashgf.ru/afisha/
     default_city: Уфа
     default_category: concert
-    is_enabled: false
-    request_timeout_seconds: 6.0
+    default_venue: Башкирская государственная филармония имени Хусаина Ахметова
+    is_enabled: true
+    request_timeout_seconds: 10.0
+    parser:
+      name: wordpress_events
+
+  - name: sgtko-sterlitamak
+    source_type: webpage
+    source_url: https://sgtko.ru/afisha/
+    default_city: Стерлитамак
+    default_venue: Стерлитамакское государственное театрально-концертное объединение
+    is_enabled: true
+    request_timeout_seconds: 10.0
+    parser:
+      name: wordpress_events
+
+  # Город по умолчанию не задан намеренно: сеансы с «Разными адресами проведения», для которых
+  # город не удалось уточнить по странице сеанса, должны уйти в модерацию, а не получить Салават.
+  - name: quicktickets-salavat
+    source_type: webpage
+    source_url: https://quicktickets.ru/salavat/afisha
+    default_category: spectacle
+    default_venue: Салаватский государственный башкирский драматический театр
+    is_enabled: true
+    request_timeout_seconds: 10.0
+    parser:
+      name: quicktickets
+      options:
+        city: Салават
+
+  - name: rusdramteatr-sterlitamak
+    source_type: webpage
+    source_url: https://rusdramteatr.ru/afisha
+    default_city: Стерлитамак
+    default_category: spectacle
+    default_venue: Стерлитамакский государственный русский драматический театр
+    is_enabled: true
+    request_timeout_seconds: 10.0
+    parser:
+      name: rusdramteatr

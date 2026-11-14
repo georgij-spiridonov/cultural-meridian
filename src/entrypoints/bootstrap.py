@@ -44,7 +44,7 @@ from src.infrastructure.database import (
 from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor, create_openai_client
 from src.infrastructure.notifications import TelegramSubscriptionNotificationSender
-from src.infrastructure.sources import CompositeSourceFetcher, HttpLinkChecker
+from src.infrastructure.sources import CompositeSourceFetcher, HttpLinkChecker, PoliteHttpClient
 
 __all__ = ["ApplicationContainer", "build_application_container"]
 
@@ -83,6 +83,7 @@ class ApplicationContainer:
         link_checker: Адаптер проверки доступности ссылок на первоисточники.
         event_ingestion_service: Прикладной конвейер сбора, гибридной нормализации и дедупликации.
         telegram_notification_sender: Адаптер доставки уведомлений по подпискам в Telegram (или `None`).
+        source_http_client: Общий вежливый HTTP-клиент загрузчиков и проверки ссылок.
     """
 
     application_settings: ApplicationSettings
@@ -112,6 +113,7 @@ class ApplicationContainer:
     link_checker: HttpLinkChecker | None = None
     event_ingestion_service: EventIngestionService | None = None
     telegram_notification_sender: TelegramSubscriptionNotificationSender | None = None
+    source_http_client: PoliteHttpClient | None = None
     _openai_client: AsyncOpenAI | None = field(default=None, repr=False)
 
     async def startup(self) -> None:
@@ -128,6 +130,8 @@ class ApplicationContainer:
             await self.source_fetcher.close()
         if self.link_checker is not None:
             await self.link_checker.close()
+        if self.source_http_client is not None:
+            await self.source_http_client.close()
         if self.geolocation_resolver is not None:
             await self.geolocation_resolver.close()
         if self._openai_client is not None:
@@ -194,10 +198,17 @@ def build_application_container(
         settings=resolved_geolocation_settings, event_repository=event_repository
     )
 
+    source_http_client = PoliteHttpClient(
+        user_agent=resolved_ingestion_settings.USER_AGENT,
+        max_concurrent_requests_per_host=resolved_ingestion_settings.MAX_CONCURRENT_REQUESTS_PER_HOST,
+        request_delay_seconds=resolved_ingestion_settings.REQUEST_DELAY_SECONDS,
+    )
     source_fetcher = CompositeSourceFetcher(
         project_root=PROJECT_ROOT,
         local_feeds_directory=resolved_ingestion_settings.LOCAL_FEEDS_DIRECTORY,
         user_agent=resolved_ingestion_settings.USER_AGENT,
+        polite_client=source_http_client,
+        sources_config_path=resolved_ingestion_settings.SOURCES_CONFIG_PATH,
     )
     link_checker = HttpLinkChecker(
         user_agent=resolved_ingestion_settings.USER_AGENT,
@@ -205,6 +216,7 @@ def build_application_container(
         project_root=PROJECT_ROOT,
         local_feeds_directory=resolved_ingestion_settings.LOCAL_FEEDS_DIRECTORY,
         verify_local_file_links=resolved_ingestion_settings.VERIFY_LOCAL_FILE_LINKS,
+        polite_client=source_http_client,
     )
     telegram_notification_sender: TelegramSubscriptionNotificationSender | None = None
     bot_token = resolved_telegram_settings.BOT_TOKEN.strip()
@@ -292,5 +304,6 @@ def build_application_container(
         link_checker=link_checker,
         event_ingestion_service=event_ingestion_service,
         telegram_notification_sender=telegram_notification_sender,
+        source_http_client=source_http_client,
         _openai_client=openai_client,
     )

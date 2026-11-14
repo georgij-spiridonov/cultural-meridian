@@ -501,6 +501,8 @@ class IngestionSettings(BaseSettings):
         VERIFY_LOCAL_FILE_LINKS: Признак проверки существования локальных ссылок на диске при офлайн-сборе.
         REPROCESS_BATCH_LIMIT: Максимальное число сырых записей за один пакет повторной нормализации.
         USER_AGENT: Заголовок `User-Agent` для запросов фонового сборщика и проверщика ссылок.
+        MAX_CONCURRENT_REQUESTS_PER_HOST: Максимальное число одновременных HTTP-запросов к одному сайту.
+        REQUEST_DELAY_SECONDS: Пауза между началами HTTP-запросов к одному сайту в секундах.
     """
 
     model_config = SettingsConfigDict(
@@ -522,6 +524,8 @@ class IngestionSettings(BaseSettings):
     VERIFY_LOCAL_FILE_LINKS: bool = True
     REPROCESS_BATCH_LIMIT: int = Field(default=100, ge=1, le=1000)
     USER_AGENT: str = "cultural-meridian-bot/1.0 (+https://cultural-meridian.local)"
+    MAX_CONCURRENT_REQUESTS_PER_HOST: int = Field(default=2, ge=1, le=10)
+    REQUEST_DELAY_SECONDS: float = Field(default=1.0, ge=0.0, le=60.0)
 
     @field_validator("SOURCES_CONFIG_PATH", "LOCAL_FEEDS_DIRECTORY", mode="after")
     @classmethod

@@ -2,20 +2,20 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from types import MappingProxyType
+from typing import Final, Literal, Self
 from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import url2pathname
 
 import httpx
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from src.core.configuration import PROJECT_ROOT
 from src.core.exceptions import (
     AccessPermissionDeniedError,
-    NetworkConnectionFailureError,
-    NetworkConnectionTimeoutError,
     ServiceRateLimitExceededError,
     ServiceUnavailableError,
     ValidationInputError,
@@ -27,8 +27,20 @@ from src.domain.entities import FetchedSourceItem, SourceDefinition
 from src.domain.exceptions import UnsupportedSourceFormatError
 from src.domain.ports import SourceFetcherPort
 from src.domain.services import compute_payload_hash
+from src.infrastructure.sources.http_client import PoliteHttpClient
 
-__all__ = ["CompositeSourceFetcher", "SourceRegistryItemSchema", "SourcesRegistrySchema", "load_sources_registry"]
+__all__ = [
+    "CompositeSourceFetcher",
+    "ParserConfiguration",
+    "ParserName",
+    "SourceParserSchema",
+    "SourceRegistryItemSchema",
+    "SourcesRegistrySchema",
+    "load_parser_configurations",
+    "load_sources_registry",
+]
+
+type ParserName = Literal["wordpress_events", "quicktickets", "rusdramteatr", "bashopera"]
 
 logger = get_logger(__name__)
 
@@ -43,6 +55,37 @@ _CANCELED_STATUS_VALUES: Final[frozenset[str]] = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ParserConfiguration:
+    """Именной парсер разметки конкретного сайта; живёт в инфраструктуре и не попадает в домен.
+
+    Attributes:
+        parser: Имя парсера разметки.
+        options: Строковые параметры парсера (например, город страницы афиши).
+    """
+
+    parser: ParserName
+    options: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        """Делает параметры парсера неизменяемыми."""
+        object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
+
+
+class SourceParserSchema(BaseModel):
+    """Схема секции `parser` источника в `sources.yaml`.
+
+    Attributes:
+        name: Имя именного парсера разметки сайта.
+        options: Строковые параметры парсера.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: ParserName
+    options: dict[str, str] = Field(default_factory=dict)
+
+
 class SourceRegistryItemSchema(BaseModel):
     """Строгая Pydantic-схема одного источника в файле `configuration/sources.yaml`.
 
@@ -52,8 +95,10 @@ class SourceRegistryItemSchema(BaseModel):
         source_url: HTTP(S)-адрес, `file://`-URI или относительный путь к локальному фиду.
         default_city: Город по умолчанию для записей без явного указания города.
         default_category: Категория по умолчанию для специализированных источников.
+        default_venue: Площадка источника в его городе, как она названа в справочнике площадок.
         is_enabled: Признак активности источника при плановом сборе.
         request_timeout_seconds: Таймаут сетевого запроса в секундах.
+        parser: Именной парсер разметки сайта; без него HTML разбирается общим разбором JSON-LD и карточек.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -63,8 +108,17 @@ class SourceRegistryItemSchema(BaseModel):
     source_url: str = Field(min_length=1)
     default_city: str | None = None
     default_category: EventCategory | None = None
+    default_venue: str | None = None
     is_enabled: bool = True
     request_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    parser: SourceParserSchema | None = None
+
+    @model_validator(mode="after")
+    def _check_parser_source_type(self) -> Self:
+        """Разрешает именной парсер только для HTML-источников."""
+        if self.parser is not None and self.source_type != SourceType.WEBPAGE:
+            raise ValueError("Именной парсер задаётся только для источников типа webpage.")
+        return self
 
     @field_validator("name", "source_url", mode="before")
     @classmethod
@@ -228,6 +282,55 @@ def load_sources_registry(
         ValidationInputError: Если файл реестра не найден или не читается.
         ValidationSchemaError: При ошибке YAML или нарушении строгой схемы реестра.
     """
+    validated_registry = _load_validated_registry(config_path, project_root=project_root)
+
+    definitions: list[SourceDefinition] = []
+    for item in validated_registry.sources:
+        if only_enabled and not item.is_enabled:
+            continue
+        definitions.append(
+            SourceDefinition(
+                name=item.name,
+                source_type=item.source_type,
+                source_url=item.source_url,
+                default_city=item.default_city,
+                default_category=item.default_category,
+                default_venue=item.default_venue,
+                is_enabled=item.is_enabled,
+                request_timeout_seconds=item.request_timeout_seconds,
+            )
+        )
+    return tuple(definitions)
+
+
+def load_parser_configurations(
+    config_path: Path, *, project_root: Path = PROJECT_ROOT
+) -> Mapping[str, ParserConfiguration]:
+    """Возвращает именные парсеры источников из YAML-реестра по имени источника.
+
+    Arguments:
+        config_path: Путь к YAML-файлу реестра источников.
+        project_root: Корень проекта для разрешения относительного пути.
+
+    Returns:
+        Неизменяемое отображение «имя источника → конфигурация парсера» только для источников с парсером.
+
+    Raises:
+        ValidationInputError: Если файл реестра не найден или не читается.
+        ValidationSchemaError: При ошибке YAML или нарушении строгой схемы реестра.
+    """
+    validated_registry = _load_validated_registry(config_path, project_root=project_root)
+    return MappingProxyType(
+        {
+            item.name: ParserConfiguration(parser=item.parser.name, options=item.parser.options)
+            for item in validated_registry.sources
+            if item.parser is not None
+        }
+    )
+
+
+def _load_validated_registry(config_path: Path, *, project_root: Path) -> SourcesRegistrySchema:
+    """Читает YAML-реестр, проверяет его строгой схемой, уникальность имён и локальные пути."""
     resolved_config = config_path if config_path.is_absolute() else (project_root / config_path)
     if not resolved_config.is_file():
         raise ValidationInputError(f"Файл реестра источников не найден: {resolved_config}")
@@ -264,7 +367,6 @@ def load_sources_registry(
     except ValidationError as exc:
         raise ValidationSchemaError(f"Ошибка валидации схемы реестра источников '{resolved_config}': {exc}") from exc
 
-    definitions: list[SourceDefinition] = []
     seen_names: set[str] = set()
     for item in validated_registry.sources:
         if item.name in seen_names:
@@ -274,22 +376,7 @@ def load_sources_registry(
         if not is_http_url(item.source_url):
             resolve_local_source_path(item.source_url, project_root=project_root)
 
-        if only_enabled and not item.is_enabled:
-            continue
-
-        definitions.append(
-            SourceDefinition(
-                name=item.name,
-                source_type=item.source_type,
-                source_url=item.source_url,
-                default_city=item.default_city,
-                default_category=item.default_category,
-                is_enabled=item.is_enabled,
-                request_timeout_seconds=item.request_timeout_seconds,
-            )
-        )
-
-    return tuple(definitions)
+    return validated_registry
 
 
 def raise_for_http_status(response: httpx.Response, *, source_name: str, source_url: str) -> None:
@@ -334,20 +421,49 @@ def raise_for_http_status(response: httpx.Response, *, source_name: str, source_
         ) from exc
 
 
+def create_standalone_polite_client(
+    *,
+    user_agent: str = DEFAULT_SOURCE_USER_AGENT,
+    http_client: httpx.AsyncClient | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> PoliteHttpClient:
+    """Создаёт HTTP-клиент для загрузчика, собранного без общего клиента сборщика.
+
+    Такой клиент соблюдает `robots.txt` и `User-Agent`, но делает одну попытку без пауз.
+    Паузы, повторы и общий лимит запросов к сайту даёт клиент, который корень композиции
+    создаёт один на все загрузчики и проверку ссылок.
+
+    Arguments:
+        user_agent: Значение HTTP-заголовка `User-Agent`.
+        http_client: Внешний `httpx.AsyncClient`.
+        transport: Транспорт `httpx` для изолированного тестирования.
+
+    Returns:
+        Клиент с одной попыткой и без пауз между запросами.
+    """
+    return PoliteHttpClient(
+        user_agent=user_agent,
+        request_delay_seconds=0.0,
+        maximum_attempts=1,
+        http_client=http_client,
+        transport=transport,
+    )
+
+
 async def fetch_source_bytes(
     *,
     source: SourceDefinition,
-    get_http_client: Callable[[], httpx.AsyncClient],
-    user_agent: str = DEFAULT_SOURCE_USER_AGENT,
+    http_client: PoliteHttpClient,
     project_root: Path = PROJECT_ROOT,
     local_feeds_directory: Path | None = None,
 ) -> bytes:
     """Загружает сырые байты источника по HTTP(S), `file://` или из локального файла.
 
+    Сетевой запрос идёт через `PoliteHttpClient`: адрес, запрещённый `robots.txt`, не загружается.
+
     Arguments:
         source: Описание загружаемого источника.
-        get_http_client: Фабрика переиспользуемого `httpx.AsyncClient`.
-        user_agent: Значение HTTP-заголовка `User-Agent`.
+        http_client: Вежливый HTTP-клиент сборщика.
         project_root: Корневая директория проекта.
         local_feeds_directory: Дополнительная директория локальных фидов.
 
@@ -355,9 +471,10 @@ async def fetch_source_bytes(
         Необработанные байты содержимого источника.
 
     Raises:
-        AccessPermissionDeniedError: При ошибке прав доступа или выходе локального пути за пределы проекта.
-        NetworkConnectionFailureError: При сетевом сбое соединения `httpx`.
-        NetworkConnectionTimeoutError: При превышении таймаута `httpx`.
+        AccessPermissionDeniedError: При запрете `robots.txt`, ошибке прав доступа
+            или выходе локального пути за пределы проекта.
+        NetworkConnectionFailureError: При сетевом сбое соединения.
+        NetworkConnectionTimeoutError: При превышении таймаута.
         ServiceRateLimitExceededError: При ответе HTTP 429.
         ServiceUnavailableError: При ответе HTTP 5xx.
         UnsupportedSourceFormatError: При неподдерживаемой схеме URL.
@@ -368,25 +485,9 @@ async def fetch_source_bytes(
         parsed = urlsplit(source_url)
         if not parsed.netloc:
             raise ValidationInputError(f"Некорректный HTTP-адрес источника '{source.name}': {source_url}")
-        client = get_http_client()
-        try:
-            response = await client.get(
-                source_url,
-                timeout=source.request_timeout_seconds,
-                headers={"User-Agent": user_agent},
-                follow_redirects=True,
-            )
-        except httpx.TimeoutException as exc:
-            raise NetworkConnectionTimeoutError(
-                f"Превышен таймаут загрузки источника '{source.name}' ({source_url})."
-            ) from exc
-        except httpx.InvalidURL as exc:
-            raise ValidationInputError(f"Некорректный URL источника '{source.name}' ({source_url}): {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise NetworkConnectionFailureError(
-                f"Сетевая ошибка при загрузке источника '{source.name}' ({source_url}): {exc}"
-            ) from exc
-
+        if not await http_client.is_allowed(source_url):
+            raise AccessPermissionDeniedError(f"robots.txt запрещает обход источника '{source.name}' ({source_url}).")
+        response = await http_client.request("GET", source_url, timeout_seconds=source.request_timeout_seconds)
         raise_for_http_status(response, source_name=source.name, source_url=source_url)
         return response.content
 
@@ -603,6 +704,8 @@ class CompositeSourceFetcher:
         user_agent: str = DEFAULT_SOURCE_USER_AGENT,
         transport: httpx.AsyncBaseTransport | None = None,
         http_client: httpx.AsyncClient | None = None,
+        polite_client: PoliteHttpClient | None = None,
+        sources_config_path: Path | None = None,
     ) -> None:
         """Инициализирует составной загрузчик с готовыми или созданными по умолчанию адаптерами.
 
@@ -615,6 +718,8 @@ class CompositeSourceFetcher:
             user_agent: Заголовок `User-Agent` для HTTP-запросов.
             transport: Опциональный транспорт `httpx` для тестов.
             http_client: Опциональный внешний `httpx.AsyncClient`.
+            polite_client: Общий вежливый HTTP-клиент сборщика; закрывается его владельцем, а не фасадом.
+            sources_config_path: Реестр источников для выбора именных парсеров сайтов.
         """
         self._owned_closers: list[Callable[[], Awaitable[None]]] = []
 
@@ -627,6 +732,7 @@ class CompositeSourceFetcher:
                 user_agent=user_agent,
                 project_root=project_root,
                 local_feeds_directory=local_feeds_directory,
+                polite_client=polite_client,
             )
             self._owned_closers.append(default_rss.close)
             rss_fetcher = default_rss
@@ -640,6 +746,7 @@ class CompositeSourceFetcher:
                 user_agent=user_agent,
                 project_root=project_root,
                 local_feeds_directory=local_feeds_directory,
+                polite_client=polite_client,
             )
             self._owned_closers.append(default_json.close)
             json_fetcher = default_json
@@ -653,6 +760,8 @@ class CompositeSourceFetcher:
                 user_agent=user_agent,
                 project_root=project_root,
                 local_feeds_directory=local_feeds_directory,
+                polite_client=polite_client,
+                sources_config_path=sources_config_path,
             )
             self._owned_closers.append(default_html.close)
             html_fetcher = default_html

@@ -26,6 +26,7 @@ from src.infrastructure.sources import (
     RssSourceFetcher,
     load_sources_registry,
 )
+from src.infrastructure.sources.registry import is_http_url
 
 
 def _make_source(
@@ -50,13 +51,18 @@ def test_load_sources_registry_real_yaml_and_filtering() -> None:
     all_sources = load_sources_registry(config_path, only_enabled=False)
     enabled_sources = load_sources_registry(config_path, only_enabled=True)
 
-    assert len(all_sources) == 8
-    assert len(enabled_sources) == 4
+    assert len(all_sources) == 11
+    assert len(enabled_sources) == 9
     assert [source.name for source in enabled_sources] == [
         "ufa_culture_rss",
         "sterlitamak_afisha_api",
         "salavat_theaters_html",
         "neftekamsk_philharmonic_api",
+        "bashopera-ufa",
+        "bashgf-ufa",
+        "sgtko-sterlitamak",
+        "quicktickets-salavat",
+        "rusdramteatr-sterlitamak",
     ]
     assert all(source.is_enabled for source in enabled_sources)
     assert any(not source.is_enabled for source in all_sources)
@@ -132,7 +138,11 @@ sources:
 
 async def test_composite_fetcher_reads_real_local_feeds() -> None:
     """Проверяет чтение всех активных локальных фидов из `data/local_feeds/*`."""
-    enabled_sources = load_sources_registry(PROJECT_ROOT / "configuration" / "sources.yaml", only_enabled=True)
+    enabled_sources = [
+        source
+        for source in load_sources_registry(PROJECT_ROOT / "configuration" / "sources.yaml", only_enabled=True)
+        if not is_http_url(source.source_url)
+    ]
     fetcher = CompositeSourceFetcher(project_root=PROJECT_ROOT)
     try:
         items_by_source = {source.name: await fetcher.fetch_items(source=source) for source in enabled_sources}

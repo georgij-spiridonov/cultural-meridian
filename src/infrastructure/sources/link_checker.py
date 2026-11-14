@@ -8,15 +8,24 @@ from urllib.parse import urlsplit
 import httpx
 
 from src.core.configuration import PROJECT_ROOT
-from src.core.exceptions import AccessPermissionDeniedError, ValidationInputError
+from src.core.exceptions import (
+    AccessPermissionDeniedError,
+    ApplicationException,
+    NetworkConnectionTimeoutError,
+    ServiceRateLimitExceededError,
+    ServiceUnavailableError,
+    ValidationInputError,
+)
 from src.domain.entities import LinkCheckResult
 from src.domain.exceptions import UnsupportedSourceFormatError
 from src.domain.services import BASHKORTOSTAN_TIMEZONE
+from src.infrastructure.sources.http_client import PoliteHttpClient
 from src.infrastructure.sources.registry import DEFAULT_SOURCE_USER_AGENT, is_http_url, resolve_local_source_path
 
 __all__ = ["HttpLinkChecker"]
 
-_HEAD_FALLBACK_STATUS_CODES: frozenset[int] = frozenset({405, 501})
+# 403 добавлен к фоллбэку: часть сайтов отвечает «Forbidden» на HEAD, но отдаёт страницу по GET.
+_HEAD_FALLBACK_STATUS_CODES: frozenset[int] = frozenset({403, 405, 501})
 
 
 class HttpLinkChecker:
@@ -32,6 +41,7 @@ class HttpLinkChecker:
         project_root: Path = PROJECT_ROOT,
         local_feeds_directory: Path | None = None,
         verify_local_file_links: bool = True,
+        polite_client: PoliteHttpClient | None = None,
     ) -> None:
         """Инициализирует адаптер проверки ссылок с безопасной обработкой локальных путей.
 
@@ -43,33 +53,25 @@ class HttpLinkChecker:
             project_root: Корневая директория проекта для контроля локальных путей.
             local_feeds_directory: Дополнительная директория локальных фидов.
             verify_local_file_links: Проверять ли физическое наличие локальных файлов на диске.
+            polite_client: Общий вежливый HTTP-клиент сборщика; без него создаётся собственный.
         """
-        self._http_client = http_client
-        self._owns_http_client = http_client is None
-        self._transport = transport
-        self._user_agent = user_agent
+        self._owns_polite_client = polite_client is None
+        self._polite_client = polite_client or PoliteHttpClient(
+            user_agent=user_agent,
+            request_delay_seconds=0.0,
+            maximum_attempts=1,
+            http_client=http_client,
+            transport=transport,
+        )
         self._default_timeout_seconds = default_timeout_seconds
         self._project_root = project_root
         self._local_feeds_directory = local_feeds_directory
         self._verify_local_file_links = verify_local_file_links
 
-    def _get_or_create_http_client(self) -> httpx.AsyncClient:
-        """Возвращает переданный или лениво созданный асинхронный HTTP-клиент."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self._default_timeout_seconds),
-                headers={"User-Agent": self._user_agent},
-                follow_redirects=True,
-                transport=self._transport,
-            )
-            self._owns_http_client = True
-        return self._http_client
-
     async def close(self) -> None:
-        """Закрывает внутренний `httpx.AsyncClient`, если он был создан самим адаптером."""
-        if self._owns_http_client and self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+        """Закрывает собственный HTTP-клиент, если он был создан самим адаптером."""
+        if self._owns_polite_client:
+            await self._polite_client.close()
 
     async def _check_http_link(
         self, *, target_url: str, timeout_seconds: float, checked_at: datetime
@@ -87,16 +89,12 @@ class HttpLinkChecker:
             )
 
         effective_timeout = timeout_seconds if timeout_seconds > 0.0 else self._default_timeout_seconds
-        headers = {"User-Agent": self._user_agent}
-        client = self._get_or_create_http_client()
 
         try:
-            response = await client.head(target_url, timeout=effective_timeout, headers=headers, follow_redirects=True)
+            response = await self._polite_client.request("HEAD", target_url, timeout_seconds=effective_timeout)
             if response.status_code in _HEAD_FALLBACK_STATUS_CODES:
-                response = await client.get(
-                    target_url, timeout=effective_timeout, headers=headers, follow_redirects=True
-                )
-        except httpx.TimeoutException:
+                response = await self._polite_client.request("GET", target_url, timeout_seconds=effective_timeout)
+        except NetworkConnectionTimeoutError:
             return LinkCheckResult(
                 target_url=target_url,
                 is_reachable=False,
@@ -105,13 +103,22 @@ class HttpLinkChecker:
                 error_reason="Превышен тайм-аут проверки ссылки источника.",
                 checked_at=checked_at,
             )
-        except (httpx.HTTPError, ValueError) as exc:
+        except (ServiceRateLimitExceededError, ServiceUnavailableError) as exc:
             return LinkCheckResult(
                 target_url=target_url,
                 is_reachable=False,
                 http_status_code=None,
                 final_url=None,
-                error_reason=f"Сетевая ошибка при проверке ссылки: {exc}",
+                error_reason=f"Сервер источника недоступен: {exc.message}",
+                checked_at=checked_at,
+            )
+        except ApplicationException as exc:
+            return LinkCheckResult(
+                target_url=target_url,
+                is_reachable=False,
+                http_status_code=None,
+                final_url=None,
+                error_reason=f"Сетевая ошибка при проверке ссылки: {exc.message}",
                 checked_at=checked_at,
             )
 

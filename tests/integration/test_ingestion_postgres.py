@@ -2,10 +2,12 @@
 
 from collections.abc import AsyncIterator
 from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+import yaml
 from sqlalchemy import select
 
 from src.core.configuration import (
@@ -30,12 +32,23 @@ pytestmark = pytest.mark.integration
 _INGESTION_REFERENCE_TIME = datetime(2026, 11, 14, 12, 0, tzinfo=BASHKORTOSTAN_TIMEZONE)
 
 
+def _write_local_feeds_registry(target: Path) -> Path:
+    """Пишет копию реестра проекта только с локальными фидами, чтобы тест не обращался к реальным сайтам."""
+    document = yaml.safe_load((PROJECT_ROOT / "configuration" / "sources.yaml").read_text(encoding="utf-8"))
+    document["sources"] = [
+        source for source in document["sources"] if not str(source["source_url"]).startswith(("http://", "https://"))
+    ]
+    target.write_text(yaml.safe_dump(document, allow_unicode=True), encoding="utf-8")
+    return target
+
+
 @pytest_asyncio.fixture
 async def ingestion_container(
-    test_database_settings: DatabaseSettings, database_engine_manager: DatabaseEngineManager
+    test_database_settings: DatabaseSettings, database_engine_manager: DatabaseEngineManager, tmp_path: Path
 ) -> AsyncIterator[ApplicationContainer]:
-    """Собирает `ApplicationContainer` с выключенной LLM поверх чистой тестовой БД."""
+    """Собирает `ApplicationContainer` с выключенной LLM поверх чистой тестовой БД и локальных фидов."""
     del database_engine_manager
+    local_registry = _write_local_feeds_registry(tmp_path / "sources.yaml")
     container = build_application_container(
         database_settings=test_database_settings,
         language_model_settings=LanguageModelSettings(_env_file=None, API_KEY=""),
@@ -44,7 +57,7 @@ async def ingestion_container(
         ),
         ingestion_settings=IngestionSettings(
             _env_file=None,
-            SOURCES_CONFIG_PATH=PROJECT_ROOT / "configuration" / "sources.yaml",
+            SOURCES_CONFIG_PATH=local_registry,
             LOCAL_FEEDS_DIRECTORY=PROJECT_ROOT / "data" / "local_feeds",
             HYBRID_LLM_ENABLED=False,
             VERIFY_LOCAL_FILE_LINKS=True,
