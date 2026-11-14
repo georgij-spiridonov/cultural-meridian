@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Evaluation reports (keep directory placeholder only)
+evaluation/reports/*
+!evaluation/reports/.gitkeep
