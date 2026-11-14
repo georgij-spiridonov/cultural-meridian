@@ -17,18 +17,14 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.event_merging import find_duplicate_in_catalog
 from src.core.configuration import PROJECT_ROOT, get_database_settings, get_logging_settings
 from src.core.exceptions import ValidationException
 from src.core.logger import get_logger, setup_logger
 from src.core.types import EventCategory, EventStatus, RealCollection, SourceType
-from src.domain.entities import CityReference, Event, EventSearchFilter, EventSourceReference, VenueReference
+from src.domain.entities import CityReference, Event, EventSourceReference, VenueReference
 from src.domain.exceptions import EventNotFoundError
-from src.domain.services.deduplication import (
-    are_events_duplicates,
-    compute_deduplication_key,
-    compute_payload_hash,
-    merge_event_sources,
-)
+from src.domain.services.deduplication import compute_deduplication_key, compute_payload_hash, merge_event_sources
 from src.domain.services.normalization import (
     BASHKORTOSTAN_TIMEZONE,
     extract_event_tags,
@@ -767,33 +763,6 @@ async def _find_existing_event(event_repository: PostgreSqlEventRepository, *, c
         return None
 
 
-async def _find_duplicate_candidate(
-    event_repository: PostgreSqlEventRepository, *, candidate_event: Event
-) -> Event | None:
-    """Ищет существующий дубль карточки в каталоге по городу и календарному дню."""
-    local_start = candidate_event.date_start.astimezone(BASHKORTOSTAN_TIMEZONE)
-    day_start = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = local_start.replace(hour=23, minute=59, second=59, microsecond=999999)
-    page = await event_repository.search_events(
-        search_filter=EventSearchFilter(
-            city=candidate_event.city, date_from=day_start, date_to=day_end, page=1, page_size=500
-        ),
-        statuses=(EventStatus.PUBLISHED, EventStatus.DRAFT, EventStatus.CANCELED),
-    )
-    for existing_candidate in page.items:
-        verdict = are_events_duplicates(
-            existing_candidate,
-            normalized_title=candidate_event.normalized_title,
-            date_start=candidate_event.date_start,
-            city=candidate_event.city,
-            venue=candidate_event.venue,
-            deduplication_key=candidate_event.deduplication_key,
-        )
-        if verdict.is_duplicate:
-            return existing_candidate
-    return None
-
-
 def _preserve_existing_secondary_sources(
     existing_sources: tuple[EventSourceReference, ...], incoming_sources: tuple[EventSourceReference, ...]
 ) -> tuple[EventSourceReference, ...]:
@@ -903,7 +872,7 @@ async def seed_events_from_file(
             updated += 1
             continue
 
-        duplicate = await _find_duplicate_candidate(event_repository, candidate_event=candidate)
+        duplicate = await find_duplicate_in_catalog(candidate=candidate, event_repository=event_repository)
         if duplicate is not None:
             merged_event = duplicate
             for source_reference in candidate.sources:

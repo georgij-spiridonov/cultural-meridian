@@ -5,11 +5,12 @@ import io
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
 from src.application._helpers import attach_default_timezone, resolve_duration_minutes, validate_http_url
+from src.application.event_merging import find_duplicate_event
 from src.application.subscriptions import SubscriptionService
 from src.core.exceptions import DomainException
 from src.core.logger import get_logger
@@ -18,7 +19,6 @@ from src.domain.entities import (
     AuditLogEntry,
     CityReference,
     Event,
-    EventSearchFilter,
     EventSourceReference,
     ExtractedEventFields,
     ImportReport,
@@ -26,11 +26,10 @@ from src.domain.entities import (
     ModerationItem,
     VenueReference,
 )
-from src.domain.exceptions import EventNotFoundError, InvalidEventDataError, UnsupportedSourceFormatError
+from src.domain.exceptions import InvalidEventDataError, UnsupportedSourceFormatError
 from src.domain.ports import AdministrationRepositoryPort, EventRepositoryPort
 from src.domain.services import (
     BASHKORTOSTAN_TIMEZONE,
-    are_events_duplicates,
     compute_deduplication_key,
     compute_payload_hash,
     extract_event_tags,
@@ -54,8 +53,6 @@ logger = get_logger(__name__)
 type ImportFormat = Literal["csv", "json"]
 
 _ALLOWED_AGE_LIMITS = frozenset({0, 6, 12, 16, 18})
-_DEDUPLICATION_WINDOW_HOURS = 24
-_MAXIMUM_SEARCH_CANDIDATES = 100
 
 _FIELD_ALIASES: dict[str, str] = {
     "identifier": "identifier",
@@ -442,65 +439,13 @@ class EventImportService:
         batch_events_by_identifier: Mapping[UUID, Event],
         batch_events_by_hash: Mapping[str, Event],
     ) -> Event | None:
-        candidate = parsed_record.candidate_event
-
-        in_batch_by_hash = batch_events_by_hash.get(candidate.source_hash)
-        if in_batch_by_hash is not None:
-            return in_batch_by_hash
-
-        if parsed_record.explicit_identifier is not None:
-            in_batch_by_identifier = batch_events_by_identifier.get(parsed_record.explicit_identifier)
-            if in_batch_by_identifier is not None:
-                return in_batch_by_identifier
-            try:
-                return await self._event_repository.get_event_by_identifier(
-                    event_identifier=parsed_record.explicit_identifier, include_non_published=True
-                )
-            except EventNotFoundError:
-                pass
-
-        matched_by_hash = await self._event_repository.find_by_source_hash(
-            source_type=candidate.source_type, source_hash=candidate.source_hash
+        return await find_duplicate_event(
+            candidate=parsed_record.candidate_event,
+            event_repository=self._event_repository,
+            batch_events_by_identifier=batch_events_by_identifier,
+            batch_events_by_hash=batch_events_by_hash,
+            explicit_identifier=parsed_record.explicit_identifier,
         )
-        if matched_by_hash is not None:
-            return matched_by_hash
-
-        for batch_candidate in batch_events_by_identifier.values():
-            duplicate_check = are_events_duplicates(
-                batch_candidate,
-                normalized_title=candidate.normalized_title,
-                date_start=candidate.date_start,
-                city=candidate.city,
-                venue=candidate.venue,
-                deduplication_key=candidate.deduplication_key,
-            )
-            if duplicate_check.is_duplicate:
-                return batch_candidate
-
-        window_delta = timedelta(hours=_DEDUPLICATION_WINDOW_HOURS)
-        nearby_page = await self._event_repository.search_events(
-            search_filter=EventSearchFilter(
-                city=candidate.city,
-                date_from=candidate.date_start - window_delta,
-                date_to=candidate.date_start + window_delta,
-                page=1,
-                page_size=_MAXIMUM_SEARCH_CANDIDATES,
-            ),
-            statuses=(EventStatus.PUBLISHED, EventStatus.DRAFT, EventStatus.CANCELED),
-        )
-        for existing_candidate in nearby_page.items:
-            duplicate_check = are_events_duplicates(
-                existing_candidate,
-                normalized_title=candidate.normalized_title,
-                date_start=candidate.date_start,
-                city=candidate.city,
-                venue=candidate.venue,
-                deduplication_key=candidate.deduplication_key,
-            )
-            if duplicate_check.is_duplicate:
-                return existing_candidate
-
-        return None
 
     async def _enqueue_injection_moderation_if_needed(
         self, *, parsed_record: _ParsedImportRecord, saved_event: Event, current_time: datetime
