@@ -1,6 +1,9 @@
 """SSR и HTMX-маршруты публичного веб-каталога, карточки события, подписок и обратной связи."""
 
-from datetime import datetime
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any
 from urllib.parse import urlencode
 from uuid import UUID
@@ -9,12 +12,22 @@ from fastapi import APIRouter, Form, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from src.application import EventSearchService
+from src.application import EventSearchService, WeekendPlannerService
 from src.core.exceptions import ApplicationException
 from src.core.types import DialogChannel, EventCategory, EventStatus
-from src.domain.entities import EmptySearchExplanation, Event, EventSearchFilter, EventSortField, SortDirection
-from src.domain.exceptions import EventNotFoundError, InvalidSearchFilterError
-from src.domain.services import normalize_optional_text
+from src.domain.entities import (
+    CityReference,
+    ConstraintRelaxationSuggestion,
+    EmptySearchExplanation,
+    Event,
+    EventSearchFilter,
+    EventSortField,
+    SortDirection,
+    WeekendPlanRequest,
+    WeekendPlanResult,
+)
+from src.domain.exceptions import EventNotFoundError, InvalidSearchFilterError, InvalidWeekendPlanRequestError
+from src.domain.services import BASHKORTOSTAN_TIMEZONE, normalize_optional_text
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.web._formatting import (
     ALLOWED_AGE_OPTIONS,
@@ -30,6 +43,7 @@ from src.entrypoints.web._formatting import (
     format_price_label,
     format_status_label,
     generate_visitor_identifier,
+    parse_time_value,
 )
 from src.entrypoints.web.middleware import InMemoryRateLimiter
 
@@ -437,6 +451,131 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
             ),
         )
 
+    @router.get("/planner", response_class=HTMLResponse)
+    async def planner_page(
+        request: Request,
+        city: Annotated[str | None, Query()] = None,
+        target_date: Annotated[str | None, Query()] = None,
+        window_start_time: Annotated[str | None, Query()] = None,
+        window_end_time: Annotated[str | None, Query()] = None,
+        budget_rubles: Annotated[str | None, Query()] = None,
+        companions_count: Annotated[str | None, Query()] = None,
+        child_age: Annotated[str | None, Query()] = None,
+        maximum_travel_minutes: Annotated[str | None, Query()] = None,
+    ) -> HTMLResponse:
+        """Рендерит страницу планировщика «Выходной день» с формой и SSR/HTMX-результатом."""
+        container = _require_container(request)
+        cities = await container.event_repository.list_cities()
+        weekend_dates = _resolve_upcoming_weekend_dates()
+        default_city = _resolve_default_planner_city(cities)
+        form_values = _normalize_planner_form_values(
+            city=city,
+            target_date=target_date,
+            window_start_time=window_start_time,
+            window_end_time=window_end_time,
+            budget_rubles=budget_rubles,
+            companions_count=companions_count,
+            child_age=child_age,
+            maximum_travel_minutes=maximum_travel_minutes,
+            default_city=default_city,
+            default_date=weekend_dates["default_date_iso"],
+        )
+
+        has_planner_query = any(key in request.query_params for key in _PLANNER_QUERY_KEYS)
+        if has_planner_query:
+            plan_context = await _execute_weekend_plan(
+                weekend_planner=container.weekend_planner, form_values=form_values
+            )
+        else:
+            plan_context = {
+                "form_values": form_values,
+                "plan_result": None,
+                "planner_error": None,
+                "relaxation_actions": (),
+                "share_url": "/planner",
+                "has_submitted": False,
+            }
+
+        if request.headers.get("HX-Request") == "true" and request.headers.get("HX-Target") == "planner-results":
+            return templates.TemplateResponse(
+                request=request,
+                name="partials/planner_results.html",
+                context=_base_page_context(
+                    request=request,
+                    active_nav="planner",
+                    **weekend_dates,
+                    **plan_context,
+                    format_rubles=_format_rubles,
+                    format_step_time=_format_step_time,
+                ),
+            )
+
+        return templates.TemplateResponse(
+            request=request,
+            name="planner.html",
+            context=_base_page_context(
+                request=request,
+                active_nav="planner",
+                cities=cities,
+                **weekend_dates,
+                **plan_context,
+                format_rubles=_format_rubles,
+                format_step_time=_format_step_time,
+            ),
+        )
+
+    @router.get("/partials/weekend-plan", response_class=HTMLResponse)
+    async def planner_results_get_partial(
+        request: Request,
+        city: Annotated[str | None, Query()] = None,
+        target_date: Annotated[str | None, Query()] = None,
+        window_start_time: Annotated[str | None, Query()] = None,
+        window_end_time: Annotated[str | None, Query()] = None,
+        budget_rubles: Annotated[str | None, Query()] = None,
+        companions_count: Annotated[str | None, Query()] = None,
+        child_age: Annotated[str | None, Query()] = None,
+        maximum_travel_minutes: Annotated[str | None, Query()] = None,
+    ) -> HTMLResponse:
+        """Возвращает HTMX-фрагмент расчёта маршрута выходного дня по GET-параметрам."""
+        return await _render_planner_partial(
+            request=request,
+            templates=templates,
+            city=city,
+            target_date=target_date,
+            window_start_time=window_start_time,
+            window_end_time=window_end_time,
+            budget_rubles=budget_rubles,
+            companions_count=companions_count,
+            child_age=child_age,
+            maximum_travel_minutes=maximum_travel_minutes,
+        )
+
+    @router.post("/partials/weekend-plan", response_class=HTMLResponse)
+    async def planner_results_post_partial(
+        request: Request,
+        city: Annotated[str | None, Form()] = None,
+        target_date: Annotated[str | None, Form()] = None,
+        window_start_time: Annotated[str | None, Form()] = None,
+        window_end_time: Annotated[str | None, Form()] = None,
+        budget_rubles: Annotated[str | None, Form()] = None,
+        companions_count: Annotated[str | None, Form()] = None,
+        child_age: Annotated[str | None, Form()] = None,
+        maximum_travel_minutes: Annotated[str | None, Form()] = None,
+    ) -> HTMLResponse:
+        """Возвращает HTMX-фрагмент расчёта маршрута выходного дня по POST-форме."""
+        return await _render_planner_partial(
+            request=request,
+            templates=templates,
+            city=city,
+            target_date=target_date,
+            window_start_time=window_start_time,
+            window_end_time=window_end_time,
+            budget_rubles=budget_rubles,
+            companions_count=companions_count,
+            child_age=child_age,
+            maximum_travel_minutes=maximum_travel_minutes,
+        )
+
     return router
 
 
@@ -681,3 +820,363 @@ def _attach_visitor_cookie(response: Response, *, visitor_identifier: str) -> No
     response.set_cookie(
         key=VISITOR_COOKIE_NAME, value=visitor_identifier, max_age=60 * 60 * 24 * 180, httponly=True, samesite="lax"
     )
+
+
+_PLANNER_QUERY_KEYS: tuple[str, ...] = (
+    "city",
+    "target_date",
+    "window_start_time",
+    "window_end_time",
+    "budget_rubles",
+    "companions_count",
+    "child_age",
+    "maximum_travel_minutes",
+)
+_BUDGET_RELAXATION_PATTERN = re.compile(r"(\d[\d\s\u00a0]*)\s*₽")
+_WINDOW_RELAXATION_PATTERN = re.compile(r"(\d{2}:\d{2})\s*[–—-]\s*(\d{2}:\d{2})")
+_TRAVEL_RELAXATION_PATTERN = re.compile(r"(\d+)\s*мин")
+_CONSTRAINT_LABELS: dict[str, str] = {
+    "budget": "Бюджет",
+    "time_window": "Временное окно",
+    "travel": "Время в пути",
+    "age": "Возраст ребёнка",
+    "count": "Доступность событий",
+}
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PlannerFormValues:
+    """Значения полей формы планировщика «Выходной день» для SSR и HTMX."""
+
+    city: str
+    target_date: str
+    window_start_time: str
+    window_end_time: str
+    budget_rubles: str
+    companions_count: str
+    child_age: str
+    maximum_travel_minutes: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _RelaxationActionView:
+    """Представление подсказки ослабления ограничения с готовым патчем формы."""
+
+    constraint_name: str
+    constraint_label: str
+    explanation: str
+    suggested_change: str
+    is_actionable: bool
+    action_label: str | None
+    patch_fields: dict[str, str]
+    fallback_href: str
+    partial_href: str
+
+
+async def _render_planner_partial(
+    *,
+    request: Request,
+    templates: Jinja2Templates,
+    city: str | None,
+    target_date: str | None,
+    window_start_time: str | None,
+    window_end_time: str | None,
+    budget_rubles: str | None,
+    companions_count: str | None,
+    child_age: str | None,
+    maximum_travel_minutes: str | None,
+) -> HTMLResponse:
+    container = _require_container(request)
+    cities = await container.event_repository.list_cities()
+    weekend_dates = _resolve_upcoming_weekend_dates()
+    default_city = _resolve_default_planner_city(cities)
+    form_values = _normalize_planner_form_values(
+        city=city,
+        target_date=target_date,
+        window_start_time=window_start_time,
+        window_end_time=window_end_time,
+        budget_rubles=budget_rubles,
+        companions_count=companions_count,
+        child_age=child_age,
+        maximum_travel_minutes=maximum_travel_minutes,
+        default_city=default_city,
+        default_date=weekend_dates["default_date_iso"],
+    )
+    plan_context = await _execute_weekend_plan(weekend_planner=container.weekend_planner, form_values=form_values)
+    return templates.TemplateResponse(
+        request=request,
+        name="partials/planner_results.html",
+        headers={"HX-Push-Url": str(plan_context["share_url"])},
+        context=_base_page_context(
+            request=request,
+            active_nav="planner",
+            **weekend_dates,
+            **plan_context,
+            format_rubles=_format_rubles,
+            format_step_time=_format_step_time,
+        ),
+    )
+
+
+def _resolve_upcoming_weekend_dates() -> dict[str, str]:
+    today = datetime.now(tz=BASHKORTOSTAN_TIMEZONE).date()
+    days_until_saturday = (5 - today.weekday()) % 7
+    nearest_saturday = today + timedelta(days=days_until_saturday)
+    days_until_sunday = (6 - today.weekday()) % 7
+    nearest_sunday = today + timedelta(days=days_until_sunday)
+    default_date = today if today.weekday() in {5, 6} else nearest_saturday
+    return {
+        "nearest_saturday_iso": nearest_saturday.isoformat(),
+        "nearest_saturday_label": nearest_saturday.strftime("%d.%m"),
+        "nearest_sunday_iso": nearest_sunday.isoformat(),
+        "nearest_sunday_label": nearest_sunday.strftime("%d.%m"),
+        "default_date_iso": default_date.isoformat(),
+    }
+
+
+def _resolve_default_planner_city(cities: Sequence[CityReference]) -> str:
+    for item in cities:
+        if item.name == "Уфа":
+            return item.name
+    if cities:
+        return cities[0].name
+    return "Уфа"
+
+
+def _normalize_planner_form_values(
+    *,
+    city: str | None,
+    target_date: str | None,
+    window_start_time: str | None,
+    window_end_time: str | None,
+    budget_rubles: str | None,
+    companions_count: str | None,
+    child_age: str | None,
+    maximum_travel_minutes: str | None,
+    default_city: str,
+    default_date: str,
+) -> _PlannerFormValues:
+    resolved_city = default_city if city is None else city.strip()
+    resolved_date = normalize_optional_text(target_date) or default_date
+    resolved_start = normalize_optional_text(window_start_time) or "10:00"
+    resolved_end = normalize_optional_text(window_end_time) or "21:00"
+    resolved_budget = normalize_optional_text(budget_rubles)
+    resolved_companions = normalize_optional_text(companions_count)
+    resolved_child_age = normalize_optional_text(child_age) or ""
+    resolved_travel = normalize_optional_text(maximum_travel_minutes)
+    return _PlannerFormValues(
+        city=resolved_city,
+        target_date=resolved_date,
+        window_start_time=resolved_start,
+        window_end_time=resolved_end,
+        budget_rubles="2000" if resolved_budget is None else resolved_budget,
+        companions_count="1" if resolved_companions is None else resolved_companions,
+        child_age=resolved_child_age,
+        maximum_travel_minutes="20" if resolved_travel is None else resolved_travel,
+    )
+
+
+def _build_planner_url_query(values: _PlannerFormValues, *, overrides: Mapping[str, str] | None = None) -> str:
+    effective = replace(values, **overrides) if overrides else values
+    pairs: list[tuple[str, str]] = [
+        ("city", effective.city),
+        ("target_date", effective.target_date),
+        ("window_start_time", effective.window_start_time),
+        ("window_end_time", effective.window_end_time),
+        ("budget_rubles", effective.budget_rubles),
+        ("companions_count", effective.companions_count),
+    ]
+    if effective.child_age:
+        pairs.append(("child_age", effective.child_age))
+    pairs.append(("maximum_travel_minutes", effective.maximum_travel_minutes))
+    return f"?{urlencode(pairs)}"
+
+
+def _parse_planner_request(values: _PlannerFormValues) -> WeekendPlanRequest:
+    cleaned_city = normalize_optional_text(values.city)
+    if cleaned_city is None:
+        raise InvalidWeekendPlanRequestError(
+            "Выберите город для подбора маршрута.", parameter_name="city", reason="Не указан город"
+        )
+    try:
+        parsed_date = date.fromisoformat(values.target_date)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Некорректная дата маршрута (ожидается формат ГГГГ-ММ-ДД).",
+            parameter_name="target_date",
+            reason="Ошибка разбора даты",
+        ) from error
+
+    try:
+        parsed_start = parse_time_value(values.window_start_time)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Некорректное время начала свободного окна (ожидается ЧЧ:ММ).",
+            parameter_name="window_start_time",
+            reason="Ошибка разбора времени начала",
+        ) from error
+    if parsed_start is None:
+        raise InvalidWeekendPlanRequestError(
+            "Укажите время начала свободного окна.",
+            parameter_name="window_start_time",
+            reason="Отсутствует время начала",
+        )
+
+    try:
+        parsed_end = parse_time_value(values.window_end_time)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Некорректное время окончания свободного окна (ожидается ЧЧ:ММ).",
+            parameter_name="window_end_time",
+            reason="Ошибка разбора времени окончания",
+        ) from error
+    if parsed_end is None:
+        raise InvalidWeekendPlanRequestError(
+            "Укажите время окончания свободного окна.",
+            parameter_name="window_end_time",
+            reason="Отсутствует время окончания",
+        )
+
+    try:
+        parsed_budget = int(values.budget_rubles)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Общий бюджет должен быть целым числом в рублях.",
+            parameter_name="budget_rubles",
+            reason="Ошибка разбора бюджета",
+        ) from error
+
+    try:
+        parsed_companions = int(values.companions_count)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Число участников должно быть целым положительным числом.",
+            parameter_name="companions_count",
+            reason="Ошибка разбора числа участников",
+        ) from error
+
+    parsed_child_age: int | None = None
+    if values.child_age:
+        try:
+            parsed_child_age = int(values.child_age)
+        except ValueError as error:
+            raise InvalidWeekendPlanRequestError(
+                "Возраст ребёнка должен быть целым числом лет.",
+                parameter_name="child_age",
+                reason="Ошибка разбора возраста ребёнка",
+            ) from error
+
+    try:
+        parsed_travel = int(values.maximum_travel_minutes)
+    except ValueError as error:
+        raise InvalidWeekendPlanRequestError(
+            "Допустимое время на дорогу должно быть целым числом минут.",
+            parameter_name="maximum_travel_minutes",
+            reason="Ошибка разбора времени в пути",
+        ) from error
+
+    return WeekendPlanRequest(
+        city=cleaned_city,
+        target_date=parsed_date,
+        window_start_time=parsed_start,
+        window_end_time=parsed_end,
+        budget_rubles=parsed_budget,
+        companions_count=parsed_companions,
+        child_age=parsed_child_age,
+        maximum_travel_minutes=parsed_travel,
+    )
+
+
+async def _execute_weekend_plan(
+    *, weekend_planner: WeekendPlannerService, form_values: _PlannerFormValues
+) -> dict[str, Any]:
+    plan_result: WeekendPlanResult | None = None
+    planner_error: str | None = None
+    relaxation_actions: tuple[_RelaxationActionView, ...] = ()
+
+    try:
+        plan_request = _parse_planner_request(form_values)
+        plan_result = await weekend_planner.plan_weekend(plan_request)
+        if not plan_result.is_feasible:
+            relaxation_actions = _build_relaxation_actions(
+                form_values=form_values, suggestions=plan_result.relaxation_suggestions
+            )
+    except InvalidWeekendPlanRequestError as error:
+        planner_error = error.message
+
+    share_url = f"/planner{_build_planner_url_query(form_values)}"
+    return {
+        "form_values": form_values,
+        "plan_result": plan_result,
+        "planner_error": planner_error,
+        "relaxation_actions": relaxation_actions,
+        "share_url": share_url,
+        "has_submitted": True,
+    }
+
+
+def _build_relaxation_actions(
+    *, form_values: _PlannerFormValues, suggestions: Sequence[ConstraintRelaxationSuggestion]
+) -> tuple[_RelaxationActionView, ...]:
+    actions: list[_RelaxationActionView] = []
+    for suggestion in suggestions:
+        patch_fields, action_label = _extract_relaxation_patch(form_values=form_values, suggestion=suggestion)
+        is_actionable = bool(patch_fields and action_label)
+        query_suffix = _build_planner_url_query(form_values, overrides=patch_fields) if is_actionable else ""
+        actions.append(
+            _RelaxationActionView(
+                constraint_name=suggestion.constraint_name,
+                constraint_label=_CONSTRAINT_LABELS.get(suggestion.constraint_name, "Ограничение"),
+                explanation=suggestion.explanation,
+                suggested_change=suggestion.suggested_change,
+                is_actionable=is_actionable,
+                action_label=action_label,
+                patch_fields=patch_fields,
+                fallback_href=f"/planner{query_suffix}" if is_actionable else "/planner",
+                partial_href=f"/partials/weekend-plan{query_suffix}" if is_actionable else "",
+            )
+        )
+    return tuple(actions)
+
+
+def _extract_relaxation_patch(
+    *, form_values: _PlannerFormValues, suggestion: ConstraintRelaxationSuggestion
+) -> tuple[dict[str, str], str | None]:
+    name = suggestion.constraint_name
+    text = suggestion.suggested_change
+
+    if name == "budget":
+        match = _BUDGET_RELAXATION_PATTERN.search(text)
+        if match is not None:
+            digits = re.sub(r"\s+", "", match.group(1))
+            if digits.isdigit():
+                amount = int(digits)
+                return {"budget_rubles": str(amount)}, f"Увеличить бюджет до {_format_rubles(amount)}"
+
+    if name == "time_window":
+        match = _WINDOW_RELAXATION_PATTERN.search(text)
+        if match is not None:
+            start_str, end_str = match.group(1), match.group(2)
+            return (
+                {"window_start_time": start_str, "window_end_time": end_str},
+                f"Расширить окно до {start_str}–{end_str}",
+            )
+
+    if name == "travel":
+        match = _TRAVEL_RELAXATION_PATTERN.search(text)
+        if match is not None:
+            minutes = match.group(1)
+            return {"maximum_travel_minutes": minutes}, f"Увеличить дорогу до {minutes} мин"
+
+    if name == "age" and form_values.child_age:
+        return {"child_age": ""}, "Снять детский фильтр"
+
+    return {}, None
+
+
+def _format_rubles(amount: int) -> str:
+    return f"{amount:,} ₽".replace(",", " ")
+
+
+def _format_step_time(moment: datetime) -> str:
+    return moment.astimezone(BASHKORTOSTAN_TIMEZONE).strftime("%H:%M")

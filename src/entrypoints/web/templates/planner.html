@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+
+{% block title %}Планировщик «Выходной день» — Культурный Меридиан{% endblock %}
+
+{% block content %}
+  <section class="panel-card planner-intro" aria-labelledby="planner-page-title">
+    <p class="hero-banner__eyebrow">Умный маршрут без накладок</p>
+    <h1 id="planner-page-title" class="planner-intro__title">
+      Планировщик «Выходной день»
+    </h1>
+    <p class="planner-intro__subtitle">
+      Подберите последовательность из 2–4 проверенных мероприятий в одном городе Башкортостана
+      с учётом свободного окна, общего бюджета на компанию, возраста ребёнка и времени в пути между площадками.
+    </p>
+  </section>
+
+  <section class="filter-panel" aria-label="Параметры маршрута выходного дня" style="margin-top: 16px;">
+    <form
+      id="planner-form"
+      action="/planner"
+      method="get"
+      hx-post="/partials/weekend-plan"
+      hx-target="#planner-results"
+      hx-swap="innerHTML"
+      hx-indicator="#planner-loading"
+    >
+      <div class="planner-form-grid">
+        <div class="form-field">
+          <label class="form-label" for="planner-city">Город</label>
+          <select id="planner-city" class="form-control" name="city" required>
+            {% set city_names = cities | map(attribute='name') | list %}
+            {% if form_values.city and form_values.city not in city_names %}
+              <option value="{{ form_values.city }}" selected>{{ form_values.city }}</option>
+            {% endif %}
+            {% for city_ref in cities %}
+              <option value="{{ city_ref.name }}" {% if form_values.city == city_ref.name %}selected{% endif %}>
+                {{ city_ref.name }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="form-field planner-date-field">
+          <label class="form-label" for="planner-date">Дата посещения</label>
+          <input
+            id="planner-date"
+            class="form-control"
+            type="date"
+            name="target_date"
+            value="{{ form_values.target_date }}"
+            required
+          />
+          <div class="planner-quick-dates" role="group" aria-label="Быстрый выбор ближайших выходных">
+            <button
+              type="button"
+              class="button button--small {% if form_values.target_date == nearest_saturday_iso %}button--primary{% else %}button--ghost{% endif %}"
+              data-quick-date="{{ nearest_saturday_iso }}"
+              aria-pressed="{{ 'true' if form_values.target_date == nearest_saturday_iso else 'false' }}"
+            >
+              Ближайшая Сб ({{ nearest_saturday_label }})
+            </button>
+            <button
+              type="button"
+              class="button button--small {% if form_values.target_date == nearest_sunday_iso %}button--primary{% else %}button--ghost{% endif %}"
+              data-quick-date="{{ nearest_sunday_iso }}"
+              aria-pressed="{{ 'true' if form_values.target_date == nearest_sunday_iso else 'false' }}"
+            >
+              Ближайшее Вс ({{ nearest_sunday_label }})
+            </button>
+          </div>
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-window-start">Свободное окно с</label>
+          <input
+            id="planner-window-start"
+            class="form-control"
+            type="time"
+            name="window_start_time"
+            value="{{ form_values.window_start_time }}"
+            required
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-window-end">Свободное окно до</label>
+          <input
+            id="planner-window-end"
+            class="form-control"
+            type="time"
+            name="window_end_time"
+            value="{{ form_values.window_end_time }}"
+            required
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-budget">Общий бюджет, ₽</label>
+          <input
+            id="planner-budget"
+            class="form-control"
+            type="number"
+            name="budget_rubles"
+            min="0"
+            step="100"
+            value="{{ form_values.budget_rubles }}"
+            required
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-companions">Число участников</label>
+          <input
+            id="planner-companions"
+            class="form-control"
+            type="number"
+            name="companions_count"
+            min="1"
+            max="50"
+            value="{{ form_values.companions_count }}"
+            required
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-child-age">Возраст ребёнка (необязательно)</label>
+          <input
+            id="planner-child-age"
+            class="form-control"
+            type="number"
+            name="child_age"
+            min="0"
+            max="18"
+            value="{{ form_values.child_age }}"
+            placeholder="Без детского фильтра"
+          />
+        </div>
+
+        <div class="form-field">
+          <label class="form-label" for="planner-max-travel">Макс. на дорогу, мин</label>
+          <input
+            id="planner-max-travel"
+            class="form-control"
+            type="number"
+            name="maximum_travel_minutes"
+            min="0"
+            max="240"
+            step="5"
+            value="{{ form_values.maximum_travel_minutes }}"
+            required
+          />
+        </div>
+      </div>
+
+      <div class="planner-form-actions">
+        <button class="button button--primary" type="submit">Подобрать маршрут</button>
+        <span id="planner-loading" class="htmx-indicator badge badge--neutral">Подбираем маршрут…</span>
+      </div>
+    </form>
+  </section>
+
+  <div id="planner-results" aria-live="polite">
+    {% include "partials/planner_results.html" %}
+  </div>
+
+  <script>
+    (function initializeWeekendPlannerUi() {
+      const form = document.getElementById("planner-form");
+      const dateInput = document.getElementById("planner-date");
+      const resultsHost = document.getElementById("planner-results");
+      if (!(form instanceof HTMLFormElement)) {
+        return;
+      }
+
+      function syncQuickDateButtons() {
+        const currentDate = dateInput instanceof HTMLInputElement ? dateInput.value : "";
+        document.querySelectorAll("[data-quick-date]").forEach(function (button) {
+          const targetDate = button.getAttribute("data-quick-date") || "";
+          const isActive = Boolean(currentDate && targetDate === currentDate);
+          button.setAttribute("aria-pressed", isActive ? "true" : "false");
+          button.classList.toggle("button--primary", isActive);
+          button.classList.toggle("button--ghost", !isActive);
+        });
+      }
+
+      if (dateInput instanceof HTMLInputElement) {
+        dateInput.addEventListener("change", syncQuickDateButtons);
+      }
+
+      document.addEventListener("click", function (event) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target) {
+          return;
+        }
+
+        const quickDateButton = target.closest("[data-quick-date]");
+        if (quickDateButton && dateInput instanceof HTMLInputElement) {
+          dateInput.value = quickDateButton.getAttribute("data-quick-date") || "";
+          syncQuickDateButtons();
+          return;
+        }
+
+        const relaxTrigger = target.closest("[data-relax-apply]");
+        if (relaxTrigger) {
+          event.preventDefault();
+
+          const budgetPatch = relaxTrigger.getAttribute("data-patch-budget");
+          const windowStartPatch = relaxTrigger.getAttribute("data-patch-window-start");
+          const windowEndPatch = relaxTrigger.getAttribute("data-patch-window-end");
+          const travelPatch = relaxTrigger.getAttribute("data-patch-travel");
+          const hasChildAgePatch = relaxTrigger.hasAttribute("data-patch-child-age");
+
+          const budgetInput = form.elements.namedItem("budget_rubles");
+          const windowStartInput = form.elements.namedItem("window_start_time");
+          const windowEndInput = form.elements.namedItem("window_end_time");
+          const travelInput = form.elements.namedItem("maximum_travel_minutes");
+          const childAgeInput = form.elements.namedItem("child_age");
+
+          if (budgetPatch !== null && budgetInput instanceof HTMLInputElement) {
+            budgetInput.value = budgetPatch;
+          }
+          if (windowStartPatch !== null && windowStartInput instanceof HTMLInputElement) {
+            windowStartInput.value = windowStartPatch;
+          }
+          if (windowEndPatch !== null && windowEndInput instanceof HTMLInputElement) {
+            windowEndInput.value = windowEndPatch;
+          }
+          if (travelPatch !== null && travelInput instanceof HTMLInputElement) {
+            travelInput.value = travelPatch;
+          }
+          if (hasChildAgePatch && childAgeInput instanceof HTMLInputElement) {
+            childAgeInput.value = relaxTrigger.getAttribute("data-patch-child-age") || "";
+          }
+
+          if (typeof form.requestSubmit === "function") {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+        }
+      });
+
+      if (resultsHost) {
+        document.body.addEventListener("htmx:afterSwap", function (event) {
+          if (event.detail && event.detail.target === resultsHost) {
+            const announcer = document.getElementById("live-announcer");
+            const summaryNode = resultsHost.querySelector("[data-planner-status]");
+            if (announcer && summaryNode) {
+              announcer.textContent = summaryNode.textContent || "Результат планировщика обновлён.";
+            }
+          }
+        });
+      }
+    })();
+  </script>
+{% endblock %}
