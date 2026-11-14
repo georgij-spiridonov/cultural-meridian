@@ -17,6 +17,7 @@ from src.domain.ports import (
     RawEventRepositoryPort,
     SourceFetcherPort,
     StructuredExtractorPort,
+    SubscriptionNotificationSenderPort,
 )
 from src.infrastructure.database import (
     DatabaseEngineManager,
@@ -27,6 +28,7 @@ from src.infrastructure.database import (
 )
 from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor
+from src.infrastructure.notifications import TelegramSubscriptionNotificationSender
 from src.infrastructure.sources import (
     CompositeSourceFetcher,
     HtmlSourceFetcher,
@@ -90,6 +92,10 @@ def _build_http_link_checker() -> HttpLinkChecker:
     return HttpLinkChecker()
 
 
+def _build_telegram_subscription_notification_sender() -> TelegramSubscriptionNotificationSender:
+    return TelegramSubscriptionNotificationSender(bot_token="123456:test-token")
+
+
 _PORT_IMPLEMENTATION_CASES: tuple[tuple[type[Any], type[Any], Callable[[], Any]], ...] = (
     (GeolocationResolverPort, HybridGeolocationResolver, _build_geolocation_resolver),
     (EventRepositoryPort, PostgreSqlEventRepository, _build_event_repository),
@@ -103,6 +109,11 @@ _PORT_IMPLEMENTATION_CASES: tuple[tuple[type[Any], type[Any], Callable[[], Any]]
     (SourceFetcherPort, HtmlSourceFetcher, _build_html_source_fetcher),
     (SourceFetcherPort, CompositeSourceFetcher, _build_composite_source_fetcher),
     (LinkCheckerPort, HttpLinkChecker, _build_http_link_checker),
+    (
+        SubscriptionNotificationSenderPort,
+        TelegramSubscriptionNotificationSender,
+        _build_telegram_subscription_notification_sender,
+    ),
 )
 
 
