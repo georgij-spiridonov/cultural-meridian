@@ -39,6 +39,12 @@ _CATEGORY_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(
     (category.value, CATEGORY_LABELS[category]) for category in EventCategory
 )
 _PERIOD_FILTER_CHIPS: tuple[tuple[str, str], ...] = tuple(PERIOD_LABELS.items())
+_LANGUAGE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("русский", "Русский"),
+    ("башкирский", "Башкирский"),
+    ("татарский", "Татарский"),
+    ("английский", "Английский"),
+)
 
 
 def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
@@ -105,6 +111,7 @@ def create_pages_router(*, templates: Jinja2Templates) -> APIRouter:
                 category_options=_CATEGORY_FILTER_CHIPS,
                 period_options=_PERIOD_FILTER_CHIPS,
                 age_options=ALLOWED_AGE_OPTIONS,
+                language_options=_LANGUAGE_OPTIONS,
                 **search_context,
             ),
         )

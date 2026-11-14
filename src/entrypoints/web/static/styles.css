@@ -137,37 +137,6 @@ a:hover {
   }
 }
 
-/* Баннер обязательного дисклеймера */
-.disclaimer-bar {
-  background-color: var(--surface-disclaimer);
-  color: var(--ink-on-dark);
-  font-size: 0.85rem;
-  line-height: 1.4;
-  padding-block: 8px;
-  border-bottom: 2px solid var(--brand-accent);
-}
-
-.disclaimer-bar__inner {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-}
-
-.disclaimer-bar__badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255, 255, 255, 0.14);
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-weight: 600;
-  font-size: 0.78rem;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
 /* Шапка и навигация */
 .site-header {
   background-color: var(--surface-card);
@@ -259,21 +228,6 @@ a:hover {
   padding-block: 24px 48px;
 }
 
-.hero-banner {
-  background: linear-gradient(125deg, #ffffff 0%, #eef5f2 65%, #fbf7eb 100%);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  padding: 20px;
-  margin-bottom: 20px;
-  box-shadow: var(--shadow-card);
-}
-
-@media (min-width: 768px) {
-  .hero-banner {
-    padding: 28px 32px;
-  }
-}
-
 .hero-banner__eyebrow {
   margin: 0 0 6px;
   font-size: 0.82rem;
@@ -281,20 +235,6 @@ a:hover {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--brand-accent);
-}
-
-.hero-banner__title {
-  margin: 0 0 8px;
-  font-size: clamp(1.45rem, 3.2vw, 2.05rem);
-  line-height: 1.2;
-  letter-spacing: -0.02em;
-}
-
-.hero-banner__lead {
-  margin: 0;
-  max-width: 72ch;
-  color: var(--ink-secondary);
-  font-size: 0.98rem;
 }
 
 /* Кнопки и элементы форм */

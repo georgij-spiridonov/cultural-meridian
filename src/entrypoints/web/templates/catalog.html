@@ -3,18 +3,6 @@
 {% block title %}Каталог мероприятий Башкортостана — Культурный Меридиан{% endblock %}
 
 {% block content %}
-  <section class="hero-banner" aria-labelledby="hero-title">
-    <p class="hero-banner__eyebrow">Культурная афиша региона</p>
-    <h1 id="hero-title" class="hero-banner__title">
-      События Республики Башкортостан в едином окне
-    </h1>
-    <p class="hero-banner__lead">
-      Проверенные концерты, спектакли, выставки, фестивали и городские лекции в Уфе,
-      Стерлитамаке, Салавате, Нефтекамске и других городах республики. Фильтры синхронизируются
-      с адресом страницы — подборку можно сразу отправить друзьям.
-    </p>
-  </section>
-
   <section class="filter-panel" aria-label="Фильтры поиска мероприятий">
     <form
       action="/"
@@ -169,14 +157,23 @@
 
           <div class="form-field">
             <label class="form-label" for="filter-language">Язык проведения</label>
-            <input
-              id="filter-language"
-              class="form-control"
-              type="text"
-              name="language"
-              value="{{ parameters.language or '' }}"
-              placeholder="русский, башкирский"
-            />
+            {% set effective_language_options = language_options if language_options is defined and language_options else [
+              ('русский', 'Русский'),
+              ('башкирский', 'Башкирский'),
+              ('татарский', 'Татарский'),
+              ('английский', 'Английский')
+            ] %}
+            <select id="filter-language" class="form-control" name="language">
+              <option value="">Любой язык</option>
+              {% for value, label in effective_language_options %}
+                <option value="{{ value }}" {% if parameters.language == value %}selected{% endif %}>
+                  {{ label }}
+                </option>
+              {% endfor %}
+              {% if parameters.language and parameters.language not in effective_language_options | map(attribute=0) | list %}
+                <option value="{{ parameters.language }}" selected>{{ parameters.language }}</option>
+              {% endif %}
+            </select>
           </div>
 
           <div class="form-field">
