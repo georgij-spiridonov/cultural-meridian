@@ -23,6 +23,7 @@ from src.entrypoints.command_line.evaluate import (
     EvaluationReportSchema,
     JudgeEvaluationSchema,
     compute_metrics_summary,
+    compute_worst_of_two_summary,
     evaluate_case_outcome,
     evaluate_with_llm_judge,
     load_evaluation_dataset,
@@ -286,3 +287,56 @@ async def test_llm_judge_mocked_and_resilient_to_failure() -> None:
         )
     assert failed_result is None
     failing_client.close.assert_awaited_once()
+
+
+def test_worst_of_two_summary_and_markdown_table(tmp_path: Path) -> None:
+    """Проверяет расчёт сводки «худшее из двух» и её отображение в Markdown-отчёте."""
+    golden_outcomes = [
+        CaseEvaluationOutcome(
+            case_id="g-1",
+            category="simple_search",
+            contour="agent",
+            passed=True,
+            catalog_precision=0.88,
+            recall_at_k=0.95,
+            latency_ms=40,
+        )
+    ]
+    holdout_outcomes = [
+        CaseEvaluationOutcome(
+            case_id="h-1",
+            category="simple_search",
+            contour="agent",
+            passed=True,
+            catalog_precision=0.92,
+            recall_at_k=1.0,
+            latency_ms=60,
+        )
+    ]
+    golden_summary = compute_metrics_summary(golden_outcomes, contour="agent")
+    holdout_summary = compute_metrics_summary(holdout_outcomes, contour="agent")
+    worst = compute_worst_of_two_summary(golden_summary, holdout_summary)
+
+    assert worst.catalog_accuracy == pytest.approx(0.88)
+    assert worst.recall_at_k == pytest.approx(0.95)
+    assert worst.latency_p95_ms == pytest.approx(60.0)
+
+    report = EvaluationReportSchema(
+        run_timestamp_utc="2026-11-14T15:00:00+00:00",
+        run_timestamp_yekaterinburg="2026-11-14T20:00:00+05:00",
+        mode="offline",
+        dataset="all",
+        prompt_version="v1.0",
+        primary_model="deterministic-offline-agent",
+        fast_model="google/gemini-3.5-flash-lite",
+        agent_summary=compute_metrics_summary(golden_outcomes + holdout_outcomes, contour="agent"),
+        baseline_summary=compute_metrics_summary([], contour="baseline"),
+        golden_agent_summary=golden_summary,
+        holdout_agent_summary=holdout_summary,
+        worst_of_two_agent_summary=worst,
+        outcomes=tuple(golden_outcomes + holdout_outcomes),
+    )
+    _, md_path = save_evaluation_report(report, output_dir=tmp_path, filename_prefix="worst_test")
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "Раздельные метрики и «худшее из двух»" in md_text
+    assert "| Golden | External Holdout | Worst-of-two | Baseline (all) |" in md_text

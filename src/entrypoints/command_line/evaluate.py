@@ -429,7 +429,54 @@ class EvaluationReportSchema(BaseModel):
     judge_model: str | None = None
     agent_summary: EvaluationMetricsSummary
     baseline_summary: EvaluationMetricsSummary
+    golden_agent_summary: EvaluationMetricsSummary | None = None
+    holdout_agent_summary: EvaluationMetricsSummary | None = None
+    worst_of_two_agent_summary: EvaluationMetricsSummary | None = None
     outcomes: tuple[CaseEvaluationOutcome, ...] = ()
+
+
+def compute_worst_of_two_summary(
+    first: EvaluationMetricsSummary, second: EvaluationMetricsSummary
+) -> EvaluationMetricsSummary:
+    """Вычисляет агрегированную сводку «худшее из двух» по п. 9.2 ТЗ."""
+    return EvaluationMetricsSummary(
+        contour=first.contour,
+        total_cases=min(first.total_cases, second.total_cases),
+        passed_cases=min(first.passed_cases, second.passed_cases),
+        pass_rate=min(first.pass_rate, second.pass_rate),
+        catalog_accuracy=min(first.catalog_accuracy, second.catalog_accuracy),
+        recall_at_k=min(first.recall_at_k, second.recall_at_k),
+        hallucinated_uuid_count=max(first.hallucinated_uuid_count, second.hallucinated_uuid_count),
+        canceled_leak_count=max(first.canceled_leak_count, second.canceled_leak_count),
+        injection_total=max(first.injection_total, second.injection_total),
+        injection_resisted_count=min(first.injection_resisted_count, second.injection_resisted_count),
+        injection_resistance_rate=min(first.injection_resistance_rate, second.injection_resistance_rate),
+        tool_match_rate=min(first.tool_match_rate, second.tool_match_rate),
+        confirmation_total=max(first.confirmation_total, second.confirmation_total),
+        confirmation_safe_count=min(first.confirmation_safe_count, second.confirmation_safe_count),
+        confirmation_safety_rate=min(first.confirmation_safety_rate, second.confirmation_safety_rate),
+        latency_p50_ms=max(first.latency_p50_ms, second.latency_p50_ms),
+        latency_p95_ms=max(first.latency_p95_ms, second.latency_p95_ms),
+        total_cost_rubles=max(first.total_cost_rubles, second.total_cost_rubles),
+        average_cost_per_turn_rubles=max(first.average_cost_per_turn_rubles, second.average_cost_per_turn_rubles),
+        judge_evaluated_count=min(first.judge_evaluated_count, second.judge_evaluated_count),
+        judge_average_explanation_score=(
+            min(first.judge_average_explanation_score, second.judge_average_explanation_score)
+            if first.judge_average_explanation_score is not None and second.judge_average_explanation_score is not None
+            else None
+        ),
+        judge_average_clarification_score=(
+            min(first.judge_average_clarification_score, second.judge_average_clarification_score)
+            if first.judge_average_clarification_score is not None
+            and second.judge_average_clarification_score is not None
+            else None
+        ),
+        judge_average_grounding_score=(
+            min(first.judge_average_grounding_score, second.judge_average_grounding_score)
+            if first.judge_average_grounding_score is not None and second.judge_average_grounding_score is not None
+            else None
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1247,6 +1294,66 @@ def render_markdown_report(report: EvaluationReportSchema) -> str:
         "",
     ]
 
+    if (
+        report.golden_agent_summary is not None
+        and report.holdout_agent_summary is not None
+        and report.worst_of_two_agent_summary is not None
+    ):
+        g = report.golden_agent_summary
+        h = report.holdout_agent_summary
+        w = report.worst_of_two_agent_summary
+        lines.extend(
+            [
+                "## Раздельные метрики и «худшее из двух» (ТЗ п. 9.2)",
+                "",
+                "| Метрика | Golden | External Holdout | Worst-of-two | Baseline (all) |",
+                "| :--- | :---: | :---: | :---: | :---: |",
+                f"| Кейсов | {g.total_cases} | {h.total_cases} | {w.total_cases} | {b.total_cases} |",
+                (
+                    f"| Pass rate | {g.pass_rate:.1%} ({g.passed_cases}/{g.total_cases}) "
+                    f"| {h.pass_rate:.1%} ({h.passed_cases}/{h.total_cases}) "
+                    f"| {w.pass_rate:.1%} | {b.pass_rate:.1%} ({b.passed_cases}/{b.total_cases}) |"
+                ),
+                (
+                    f"| Точность выдачи (`catalog_accuracy`) | {g.catalog_accuracy:.1%} "
+                    f"| {h.catalog_accuracy:.1%} | {w.catalog_accuracy:.1%} | {b.catalog_accuracy:.1%} |"
+                ),
+                (
+                    f"| Полнота (`recall_at_k`) | {g.recall_at_k:.1%} "
+                    f"| {h.recall_at_k:.1%} | {w.recall_at_k:.1%} | {b.recall_at_k:.1%} |"
+                ),
+                (
+                    f"| Выдуманные UUID | {g.hallucinated_uuid_count} "
+                    f"| {h.hallucinated_uuid_count} | {w.hallucinated_uuid_count} | {b.hallucinated_uuid_count} |"
+                ),
+                (
+                    f"| Утечка отмен | {g.canceled_leak_count} "
+                    f"| {h.canceled_leak_count} | {w.canceled_leak_count} | {b.canceled_leak_count} |"
+                ),
+                (
+                    f"| Устойчивость к инъекциям | {g.injection_resistance_rate:.1%} "
+                    f"| {h.injection_resistance_rate:.1%} | {w.injection_resistance_rate:.1%} "
+                    f"| {b.injection_resistance_rate:.1%} |"
+                ),
+                (
+                    f"| Точность инструментов | {g.tool_match_rate:.1%} "
+                    f"| {h.tool_match_rate:.1%} | {w.tool_match_rate:.1%} | {b.tool_match_rate:.1%} |"
+                ),
+                (
+                    f"| Задержка p50 / p95 (мс) | {g.latency_p50_ms:.0f} / {g.latency_p95_ms:.0f} "
+                    f"| {h.latency_p50_ms:.0f} / {h.latency_p95_ms:.0f} "
+                    f"| {w.latency_p50_ms:.0f} / {w.latency_p95_ms:.0f} "
+                    f"| {b.latency_p50_ms:.0f} / {b.latency_p95_ms:.0f} |"
+                ),
+                (
+                    f"| Стоимость / ход (₽) | {g.average_cost_per_turn_rubles:.4f} "
+                    f"| {h.average_cost_per_turn_rubles:.4f} "
+                    f"| {w.average_cost_per_turn_rubles:.4f} | 0.0000 |"
+                ),
+                "",
+            ]
+        )
+
     failed_agent = [item for item in report.outcomes if item.contour == "agent" and not item.passed]
     if failed_agent:
         lines.extend(["## Непройденные кейсы контура `agent`", ""])
@@ -1330,6 +1437,7 @@ async def run_evaluation(
     run_nonce = uuid4().hex[:8]
     agent_outcomes: list[CaseEvaluationOutcome] = []
     baseline_outcomes: list[CaseEvaluationOutcome] = []
+    outcomes_by_dataset: dict[str, list[CaseEvaluationOutcome]] = {}
     accumulated_cost = 0.0
 
     for ds in datasets:
@@ -1388,6 +1496,7 @@ async def run_evaluation(
                 judge_result=judge_result,
             )
             agent_outcomes.append(agent_outcome)
+            outcomes_by_dataset.setdefault(ds.dataset_name, []).append(agent_outcome)
 
             baseline_events, baseline_latency = await baseline_searcher.search(query=case.query)
             baseline_outcome = evaluate_case_outcome(
@@ -1404,6 +1513,16 @@ async def run_evaluation(
             )
             baseline_outcomes.append(baseline_outcome)
 
+    golden_outcomes = outcomes_by_dataset.get("golden_queries")
+    holdout_outcomes = outcomes_by_dataset.get("external_holdout")
+    golden_summary = compute_metrics_summary(golden_outcomes, contour="agent") if golden_outcomes else None
+    holdout_summary = compute_metrics_summary(holdout_outcomes, contour="agent") if holdout_outcomes else None
+    worst_summary = (
+        compute_worst_of_two_summary(golden_summary, holdout_summary)
+        if golden_summary is not None and holdout_summary is not None
+        else None
+    )
+
     now_utc = datetime.now(UTC)
     report = EvaluationReportSchema(
         run_timestamp_utc=now_utc.isoformat(),
@@ -1416,6 +1535,9 @@ async def run_evaluation(
         judge_model=container.language_model_settings.FAST if with_llm_judge else None,
         agent_summary=compute_metrics_summary(agent_outcomes, contour="agent"),
         baseline_summary=compute_metrics_summary(baseline_outcomes, contour="baseline"),
+        golden_agent_summary=golden_summary,
+        holdout_agent_summary=holdout_summary,
+        worst_of_two_agent_summary=worst_summary,
         outcomes=tuple(agent_outcomes + baseline_outcomes),
     )
     resolved_prefix = filename_prefix or f"baseline_{mode}_report"
