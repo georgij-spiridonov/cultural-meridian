@@ -165,6 +165,37 @@
     }
   });
 
+  /* Переключение панели технических сведений и трассы по бейджу «Только проверенный каталог» */
+  let tracePanelExpanded = false;
+
+  function syncTracePanelState() {
+    const toggle = document.querySelector("[data-assistant-trace-toggle]");
+    const panel = document.querySelector("[data-assistant-trace-panel]");
+    if (toggle instanceof HTMLElement) {
+      toggle.setAttribute("aria-expanded", String(tracePanelExpanded));
+    }
+    if (panel instanceof HTMLElement) {
+      panel.hidden = !tracePanelExpanded;
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    const target =
+      event.target instanceof Element ? event.target.closest("[data-assistant-trace-toggle]") : null;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    tracePanelExpanded = !tracePanelExpanded;
+    syncTracePanelState();
+    announce(
+      tracePanelExpanded
+        ? "Технические сведения и трасса ответа показаны."
+        : "Технические сведения и трасса ответа скрыты."
+    );
+  });
+
+  syncTracePanelState();
+
   /* Объявление результатов HTMX в live-region и обновление состояния веб-чата */
   document.body.addEventListener("htmx:afterSwap", function (event) {
     const detailTarget = event.detail && event.detail.target;
@@ -181,6 +212,7 @@
     }
 
     if (detailTarget.id === "assistant-chat") {
+      syncTracePanelState();
       const errorNode = detailTarget.querySelector('[data-assistant-status="error"]');
       const noticeNode = detailTarget.querySelector('[data-assistant-status="notice"]');
       const answerNode = detailTarget.querySelector("[data-assistant-answer-text]");

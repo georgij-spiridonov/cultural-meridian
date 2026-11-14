@@ -15,12 +15,6 @@
 {% if _error_text %}
   <div class="alert alert--danger assistant-alert" role="alert" data-assistant-status="error">
     <div><strong>Не удалось выполнить запрос:</strong> {{ _error_text }}</div>
-    {% if _trace_id and not _show_distinct_answer %}
-      <div class="assistant-trace-meta">
-        <span>Трасса:</span>
-        <code class="assistant-trace-id" data-assistant-trace-id="{{ _trace_id }}">{{ _trace_id }}</code>
-      </div>
-    {% endif %}
   </div>
 {% endif %}
 
@@ -40,12 +34,42 @@
   </div>
 {% endif %}
 
+<aside
+  id="assistant-trace-panel"
+  class="assistant-trace-panel"
+  aria-label="Технические сведения и трасса ответа"
+  data-assistant-trace-panel="true"
+  hidden
+>
+  <div class="assistant-trace-panel__header">
+    {% if _fallback_used %}
+      <span class="badge badge--warning">Резервный поиск</span>
+    {% else %}
+      <span class="badge badge--neutral">По данным каталога</span>
+    {% endif %}
+    {% if _trace_id %}
+      <div class="assistant-trace-meta">
+        <span>Трасса:</span>
+        <code class="assistant-trace-id" data-assistant-trace-id="{{ _trace_id }}">{{ _trace_id }}</code>
+      </div>
+    {% else %}
+      <span class="assistant-trace-empty">Трасса появится после первого ответа ассистента.</span>
+    {% endif %}
+  </div>
+  <p class="assistant-trust-note">
+    Источник доверия: подбор и факты сформированы строго по данным каталога и инструментам сервиса «Культурный Меридиан», а не «мнением модели».
+  </p>
+</aside>
+
 <section class="assistant-history" aria-labelledby="assistant-history-heading">
   <h3 id="assistant-history-heading" class="assistant-history__heading">
     История диалога{% if _messages %} (последних реплик: {{ _messages | length }}){% endif %}
   </h3>
 
-  {% if _messages %}
+  {% set _last_message = _messages[-1] if _messages else none %}
+  {% set _ephemeral_answer = _show_distinct_answer and (not _last_message or _last_message.role != "assistant" or _last_message.content != _answer_text) %}
+
+  {% if _messages or _ephemeral_answer %}
     <ol class="assistant-messages" data-assistant-messages="true">
       {% for msg in _messages %}
         {% set is_user = msg.role == "user" %}
@@ -64,9 +88,17 @@
               </time>
             {% endif %}
           </div>
-          <p class="assistant-message__content">{{ msg.content }}</p>
+          <p class="assistant-message__content" {% if loop.last and not is_user and not _ephemeral_answer %}data-assistant-answer-text="true"{% endif %}>{{ msg.content }}</p>
         </li>
       {% endfor %}
+      {% if _ephemeral_answer %}
+        <li class="assistant-message assistant-message--assistant" data-assistant-ephemeral="true">
+          <div class="assistant-message__meta">
+            <span class="assistant-message__role">Ассистент</span>
+          </div>
+          <p class="assistant-message__content" data-assistant-answer-text="true">{{ _answer_text }}</p>
+        </li>
+      {% endif %}
     </ol>
   {% else %}
     <div class="alert alert--info assistant-alert" role="status">
@@ -74,35 +106,6 @@
     </div>
   {% endif %}
 </section>
-
-{% if _show_distinct_answer %}
-  <section class="assistant-latest-answer" aria-labelledby="assistant-latest-answer-heading" data-assistant-answer="true">
-    <div class="assistant-latest-answer__header">
-      <h3 id="assistant-latest-answer-heading" class="assistant-latest-answer__title">
-        Ответ ассистента
-      </h3>
-      {% if _fallback_used %}
-        <span class="badge badge--warning">Резервный поиск</span>
-      {% else %}
-        <span class="badge badge--neutral">По данным каталога</span>
-      {% endif %}
-    </div>
-
-    <p class="assistant-latest-answer__body" data-assistant-answer-text="true">{{ _answer_text }}</p>
-
-    <div class="assistant-trust-footer">
-      <p class="assistant-trust-note">
-        Источник доверия: подбор и факты сформированы строго по данным каталога и инструментам сервиса «Культурный Меридиан», а не «мнением модели».
-      </p>
-      {% if _trace_id %}
-        <div class="assistant-trace-meta">
-          <span>Трасса:</span>
-          <code class="assistant-trace-id" data-assistant-trace-id="{{ _trace_id }}">{{ _trace_id }}</code>
-        </div>
-      {% endif %}
-    </div>
-  </section>
-{% endif %}
 
 {% if _clarifying_question %}
   <div class="alert alert--info assistant-clarifying" role="status" data-assistant-clarifying="true">

@@ -22,7 +22,16 @@
     <div class="assistant-workspace__toolbar">
       <div class="assistant-workspace__heading-wrap">
         <h2 id="assistant-chat-heading" class="assistant-workspace__title">Диалог с ассистентом</h2>
-        <span class="badge badge--neutral">Только проверенный каталог</span>
+        <button
+          id="assistant-trace-toggle"
+          class="badge badge--neutral assistant-trace-toggle"
+          type="button"
+          aria-expanded="false"
+          aria-controls="assistant-trace-panel"
+          data-assistant-trace-toggle="true"
+        >
+          Только проверенный каталог
+        </button>
       </div>
 
       <div class="assistant-workspace__controls">

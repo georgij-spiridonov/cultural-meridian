@@ -725,6 +725,12 @@ async def test_web_assistant_get_multiturn_htmx_and_non_js_dialog_with_postgres(
         assert 'href="/docs"' in page_response.text
         assert "Куда сходить в Уфе в выходные?" in page_response.text
         assert "Только бесплатные" in page_response.text
+        assert 'id="assistant-trace-toggle"' in page_response.text
+        assert 'aria-controls="assistant-trace-panel"' in page_response.text
+        assert 'aria-expanded="false"' in page_response.text
+        assert 'id="assistant-trace-panel"' in page_response.text
+        assert 'data-assistant-trace-panel="true"' in page_response.text
+        assert "data-assistant-answer=" not in page_response.text
         assert "style=" not in page_response.text
         assert re.search(r"<script(?![^>]*\bsrc=)", page_response.text) is None
 
@@ -754,6 +760,8 @@ async def test_web_assistant_get_multiturn_htmx_and_non_js_dialog_with_postgres(
             assert "Бесплатный концерт в Уфе из подтверждённого каталога." in turn_response.text
             assert "строго по данным каталога и инструментам сервиса" in turn_response.text
             assert 'data-assistant-trace-id="' in turn_response.text
+            assert 'id="assistant-trace-panel"' in turn_response.text
+            assert "data-assistant-answer=" not in turn_response.text
 
         assert "<script>alert('xss')</script>" not in turn_response.text
         assert "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;" in turn_response.text
