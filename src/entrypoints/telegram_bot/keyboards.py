@@ -1,6 +1,7 @@
 """Инлайн-клавиатуры и типизированные фабрики callback-данных Telegram-бота."""
 
 import hashlib
+from datetime import date, datetime, time, timedelta
 from typing import Final, Literal
 from uuid import UUID
 
@@ -9,8 +10,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.core.types import EventCategory, RealCollection
-from src.domain.entities import CityReference, Event, EventSearchFilter, EventSearchPage, SubscriptionRecord
-from src.domain.services import DEFAULT_BASHKORTOSTAN_CITIES
+from src.domain.entities import (
+    CityReference,
+    Event,
+    EventSearchFilter,
+    EventSearchPage,
+    SubscriptionRecord,
+    WeekendPlanRequest,
+    WeekendPlanResult,
+)
+from src.domain.services import BASHKORTOSTAN_TIMEZONE, DEFAULT_BASHKORTOSTAN_CITIES
 from src.entrypoints.telegram_bot.formatting import format_subscription_label, sanitize_public_url, truncate_plain_text
 from src.entrypoints.web._formatting import CATEGORY_LABELS
 
@@ -26,6 +35,7 @@ __all__ = [
     "RelaxFilterCallback",
     "SimilarEventsCallback",
     "SubscriptionCallback",
+    "WeekendPlanCallback",
     "build_categories_keyboard",
     "build_cities_keyboard",
     "build_empty_search_keyboard",
@@ -35,8 +45,13 @@ __all__ = [
     "build_search_results_keyboard",
     "build_similar_events_keyboard",
     "build_subscriptions_keyboard",
+    "build_weekend_plan_error_keyboard",
+    "build_weekend_plan_result_keyboard",
+    "build_weekend_planner_cities_keyboard",
+    "build_weekend_planner_keyboard",
     "compute_city_token",
     "resolve_city_from_token",
+    "resolve_upcoming_weekend_dates",
 ]
 
 MAXIMUM_CALLBACK_DATA_BYTES: Final[int] = 64
@@ -139,6 +154,44 @@ class PendingActionCallback(CallbackData, prefix="pa"):
     action_identifier: str
 
 
+class WeekendPlanCallback(CallbackData, prefix="wp"):
+    """Навигация, пресеты и ослабление ограничений планировщика «Выходной день».
+
+    Attributes:
+        action: Код действия (`menu`, `preset`, `run`, `cities`, `city`, `day`,
+            `win`, `bud`, `comp`, `age`, `trv`, `relax`, `edit`, `show`).
+        value: Компактное значение параметра или 8-символьный токен плана/города.
+        extra: Дополнительный код (например, имя ослабляемого ограничения).
+    """
+
+    action: str
+    value: str = ""
+    extra: str = ""
+
+
+def resolve_upcoming_weekend_dates(reference_now: datetime | None = None) -> tuple[date, date]:
+    """Возвращает ближайшие субботу и воскресенье в часовом поясе Башкортостана.
+
+    Arguments:
+        reference_now: Опорное время (по умолчанию текущее время в часовом поясе РБ).
+
+    Returns:
+        Кортеж `(nearest_saturday, nearest_sunday)`.
+    """
+    now = reference_now or datetime.now(tz=BASHKORTOSTAN_TIMEZONE)
+    local_now = (
+        now.replace(tzinfo=BASHKORTOSTAN_TIMEZONE) if now.tzinfo is None else now.astimezone(BASHKORTOSTAN_TIMEZONE)
+    )
+    today = local_now.date()
+    weekday = today.weekday()
+    if weekday == 5:
+        return today, today + timedelta(days=1)
+    if weekday == 6:
+        return today + timedelta(days=6), today
+    saturday = today + timedelta(days=5 - weekday)
+    return saturday, saturday + timedelta(days=1)
+
+
 def compute_city_token(city_name: str) -> str:
     """Вычисляет компактный детерминированный 8-символьный токен города для `callback_data`.
 
@@ -173,7 +226,7 @@ def resolve_city_from_token(city_token: str, cities: RealCollection[CityReferenc
 
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Строит стартовое инлайн-меню быстрого подбора, подписок и справки."""
+    """Строит стартовое инлайн-меню быстрого подбора, планировщика, подписок и справки."""
     builder = InlineKeyboardBuilder()
     builder.button(text="📅 Сегодня", callback_data=FilterCallback(filter_kind="period", filter_value="today"))
     builder.button(text="🌤 На выходные", callback_data=FilterCallback(filter_kind="period", filter_value="weekend"))
@@ -181,9 +234,10 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="👶 Детям (0–6+)", callback_data=FilterCallback(filter_kind="age", filter_value="6"))
     builder.button(text="🏙 Выбрать город", callback_data=MenuCallback(action_name="cities"))
     builder.button(text="🎭 Категории", callback_data=MenuCallback(action_name="categories"))
+    builder.button(text="🗓 Выходной день", callback_data=MenuCallback(action_name="planner"))
     builder.button(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions"))
     builder.button(text="❓ Помощь", callback_data=MenuCallback(action_name="help"))
-    builder.adjust(2, 2, 2, 2)
+    builder.adjust(2, 2, 2, 1, 2)
     return builder.as_markup()
 
 
@@ -395,7 +449,12 @@ def build_empty_search_keyboard(search_filter: EventSearchFilter, *, filter_toke
 
 
 def build_event_card_keyboard(
-    event: Event, *, filter_token: str | None = None, return_page: int = 1, public_web_base_url: str = ""
+    event: Event,
+    *,
+    filter_token: str | None = None,
+    return_page: int = 1,
+    plan_token: str | None = None,
+    public_web_base_url: str = "",
 ) -> InlineKeyboardMarkup:
     """Строит инлайн-клавиатуру для подробной карточки мероприятия.
 
@@ -403,6 +462,7 @@ def build_event_card_keyboard(
         event: Открытая карточка мероприятия.
         filter_token: Токен предыдущей выдачи поиска для кнопки возврата.
         return_page: Номер страницы выдачи для возврата.
+        plan_token: Токен маршрута «Выходной день» для кнопки возврата к плану.
         public_web_base_url: Публичный URL веб-каталога (если настроен).
 
     Returns:
@@ -432,7 +492,13 @@ def build_event_card_keyboard(
     )
 
     navigation_buttons: list[InlineKeyboardButton] = []
-    if filter_token:
+    if plan_token:
+        navigation_buttons.append(
+            InlineKeyboardButton(
+                text="⬅️ К маршруту", callback_data=WeekendPlanCallback(action="show", value=plan_token).pack()
+            )
+        )
+    elif filter_token:
         navigation_buttons.append(
             InlineKeyboardButton(
                 text="⬅️ К результатам",
@@ -532,6 +598,218 @@ def build_pending_action_keyboard(action_identifier: UUID) -> InlineKeyboardMark
         callback_data=PendingActionCallback(decision="cancel", action_identifier=action_identifier.hex),
     )
     builder.adjust(2)
+    return builder.as_markup()
+
+
+def build_weekend_planner_keyboard(
+    draft: WeekendPlanRequest, *, reference_now: datetime | None = None
+) -> InlineKeyboardMarkup:
+    """Строит инлайн-клавиатуру конструктора и пресетов планировщика «Выходной день».
+
+    Arguments:
+        draft: Текущий черновик параметров планирования.
+        reference_now: Опорное время для расчёта ближайших выходных.
+
+    Returns:
+        Инлайн-клавиатура с пресетами и быстрой настройкой ограничений.
+    """
+    saturday, sunday = resolve_upcoming_weekend_dates(reference_now=reference_now)
+    builder = InlineKeyboardBuilder()
+
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🎯 Уфа · Сб ({saturday:%d.%m}) · до 2000 ₽",
+            callback_data=WeekendPlanCallback(action="preset", value="ufa2k").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"👶 С ребёнком 6+ · Сб ({saturday:%d.%m})",
+            callback_data=WeekendPlanCallback(action="preset", value="kids6").pack(),
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🆓 Бесплатный день в Уфе · Вс ({sunday:%d.%m})",
+            callback_data=WeekendPlanCallback(action="preset", value="ufafree").pack(),
+        )
+    )
+
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🏙 {truncate_plain_text(draft.city, maximum_length=16)}",
+            callback_data=WeekendPlanCallback(action="cities").pack(),
+        ),
+        InlineKeyboardButton(
+            text=f"{'✓ ' if draft.target_date == saturday else ''}Сб {saturday:%d.%m}",
+            callback_data=WeekendPlanCallback(action="day", value="sat").pack(),
+        ),
+        InlineKeyboardButton(
+            text=f"{'✓ ' if draft.target_date == sunday else ''}Вс {sunday:%d.%m}",
+            callback_data=WeekendPlanCallback(action="day", value="sun").pack(),
+        ),
+    )
+
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{'✓ ' if draft.budget_rubles == budget else ''}{'0 ₽' if budget == 0 else f'{budget} ₽'}",
+                callback_data=WeekendPlanCallback(action="bud", value=str(budget)).pack(),
+            )
+            for budget in (0, 1000, 2000, 5000)
+        ]
+    )
+
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{'✓ ' if draft.maximum_travel_minutes == minutes else ''}≤{minutes}м",
+                callback_data=WeekendPlanCallback(action="trv", value=str(minutes)).pack(),
+            )
+            for minutes in (15, 20, 30, 45)
+        ]
+    )
+
+    age_options: tuple[tuple[str, str, int | None], ...] = (
+        ("Все", "none", None),
+        ("0+", "0", 0),
+        ("6+", "6", 6),
+        ("12+", "12", 12),
+    )
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{'✓ ' if draft.child_age == age_value else '👶 ' if age_value is not None else ''}{label}",
+                callback_data=WeekendPlanCallback(action="age", value=code).pack(),
+            )
+            for label, code, age_value in age_options
+        ]
+    )
+
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{'✓ ' if draft.companions_count == count else ''}{count} чел",
+                callback_data=WeekendPlanCallback(action="comp", value=str(count)).pack(),
+            )
+            for count in (1, 2, 3, 4)
+        ]
+    )
+
+    window_options: tuple[tuple[str, str, time, time], ...] = (
+        ("🕙 10–21", "full", time(10, 0), time(21, 0)),
+        ("🌞 11–18", "day", time(11, 0), time(18, 0)),
+        ("🌆 15–22", "eve", time(15, 0), time(22, 0)),
+    )
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{'✓ ' if (draft.window_start_time, draft.window_end_time) == (start_t, end_t) else ''}{label}",
+                callback_data=WeekendPlanCallback(action="win", value=code).pack(),
+            )
+            for label, code, start_t, end_t in window_options
+        ]
+    )
+
+    builder.row(
+        InlineKeyboardButton(text="🚀 Построить маршрут", callback_data=WeekendPlanCallback(action="run").pack()),
+        InlineKeyboardButton(text="🏠 Главное меню", callback_data=MenuCallback(action_name="home").pack()),
+    )
+    return builder.as_markup()
+
+
+def build_weekend_planner_cities_keyboard(cities: RealCollection[CityReference]) -> InlineKeyboardMarkup:
+    """Строит клавиатуру выбора города для планировщика «Выходной день»."""
+    builder = InlineKeyboardBuilder()
+    city_names = _collect_display_city_names(cities)[:_CITY_BUTTON_LIMIT]
+    for city_name in city_names:
+        builder.button(
+            text=city_name, callback_data=WeekendPlanCallback(action="city", value=compute_city_token(city_name))
+        )
+    builder.button(text="⬅️ Назад к параметрам", callback_data=WeekendPlanCallback(action="menu"))
+    builder.adjust(*([2] * ((len(city_names) + 1) // 2)), 1)
+    return builder.as_markup()
+
+
+def build_weekend_plan_result_keyboard(
+    request: WeekendPlanRequest, result: WeekendPlanResult, *, plan_token: str, public_web_base_url: str = ""
+) -> InlineKeyboardMarkup:
+    """Строит клавиатуру результата планировщика: карточки событий или ослабление ограничений.
+
+    Arguments:
+        request: Запрос, по которому построен маршрут.
+        result: Результат планировщика `WeekendPlannerService`.
+        plan_token: Короткий токен маршрута в сессии пользователя.
+        public_web_base_url: Публичный URL веб-каталога (если настроен).
+
+    Returns:
+        Инлайн-клавиатура с карточками шагов либо кнопками ослабления ограничений.
+    """
+    del request
+    builder = InlineKeyboardBuilder()
+
+    if result.is_feasible:
+        for index, step in enumerate(result.steps, start=1):
+            short_title = truncate_plain_text(step.title, maximum_length=_MAXIMUM_EVENT_BUTTON_TITLE_LENGTH)
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"🎟 {index}. {short_title}",
+                    callback_data=EventCardCallback(event_identifier=str(step.event_identifier)).pack(),
+                )
+            )
+        builder.row(
+            InlineKeyboardButton(
+                text="⚙️ Изменить параметры", callback_data=WeekendPlanCallback(action="edit", value=plan_token).pack()
+            ),
+            InlineKeyboardButton(text="🔄 Пресеты", callback_data=WeekendPlanCallback(action="menu").pack()),
+        )
+        footer_buttons: list[InlineKeyboardButton] = []
+        clean_web_url = sanitize_public_url(public_web_base_url)
+        if clean_web_url is not None:
+            footer_buttons.append(InlineKeyboardButton(text="🌐 Веб-каталог", url=clean_web_url))
+        footer_buttons.append(
+            InlineKeyboardButton(text="🏠 Главное меню", callback_data=MenuCallback(action_name="home").pack())
+        )
+        builder.row(*footer_buttons)
+        return builder.as_markup()
+
+    relax_labels: dict[str, str] = {
+        "budget": "💳 Увеличить бюджет",
+        "time_window": "🕒 Расширить окно (весь день)",
+        "travel": "🚌 Больше время переезда",
+        "age": "👶 Убрать детский фильтр",
+        "count": "📅 Попробовать другой день",
+    }
+    seen_constraints: set[str] = set()
+    for suggestion in result.relaxation_suggestions:
+        constraint_name = suggestion.constraint_name
+        if constraint_name in seen_constraints or constraint_name not in relax_labels:
+            continue
+        seen_constraints.add(constraint_name)
+        builder.row(
+            InlineKeyboardButton(
+                text=relax_labels[constraint_name],
+                callback_data=WeekendPlanCallback(action="relax", value=plan_token, extra=constraint_name).pack(),
+            )
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="🏙 Другой город", callback_data=WeekendPlanCallback(action="cities").pack()),
+        InlineKeyboardButton(
+            text="⚙️ Параметры", callback_data=WeekendPlanCallback(action="edit", value=plan_token).pack()
+        ),
+    )
+    builder.row(InlineKeyboardButton(text="🏠 Главное меню", callback_data=MenuCallback(action_name="home").pack()))
+    return builder.as_markup()
+
+
+def build_weekend_plan_error_keyboard() -> InlineKeyboardMarkup:
+    """Строит клавиатуру восстановления после ошибки параметров `/plan`."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="⚙️ Настроить маршрут", callback_data=WeekendPlanCallback(action="menu").pack()),
+        InlineKeyboardButton(text="🏠 Главное меню", callback_data=MenuCallback(action_name="home").pack()),
+    )
     return builder.as_markup()
 
 
