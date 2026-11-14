@@ -15,8 +15,17 @@ from aiogram.methods import EditMessageText, SendMessage, TelegramMethod
 from aiogram.methods.base import TelegramType
 from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, Update, User
 
-from src.application import AdministrationService, EventImportService, EventSearchService, SubscriptionService
+from src.application import (
+    AdministrationService,
+    AgentDialogService,
+    EventImportService,
+    EventSearchService,
+    FallbackSearchService,
+    SubscriptionService,
+    WeekendPlannerService,
+)
 from src.core.configuration import (
+    LanguageModelSettings,
     TelegramSettings,
     WebSettings,
     get_application_settings,
@@ -36,6 +45,7 @@ from src.infrastructure.database import (
     PostgreSqlEventRepository,
     PostgreSqlRawEventRepository,
 )
+from src.infrastructure.language_model import OpenAiStructuredExtractor
 
 pytestmark = pytest.mark.integration
 
@@ -115,22 +125,46 @@ async def telegram_container(database_engine_manager: DatabaseEngineManager) -> 
     administration_service = AdministrationService(
         event_repository=event_repository, administration_repository=administration_repository
     )
+    language_model_settings = LanguageModelSettings(_env_file=None, API_KEY="")
+    structured_extractor = OpenAiStructuredExtractor(settings=language_model_settings)
+    weekend_planner = WeekendPlannerService(event_repository=event_repository)
+    fallback_search = FallbackSearchService(event_repository=event_repository, weekend_planner=weekend_planner)
+    telegram_settings = TelegramSettings(BOT_TOKEN="", PAGE_SIZE=2, PUBLIC_WEB_BASE_URL="https://afisha.example.org")
+    agent_dialog_service = AgentDialogService(
+        event_repository=event_repository,
+        dialog_repository=dialog_repository,
+        administration_repository=administration_repository,
+        search_service=search_service,
+        subscription_service=subscription_service,
+        weekend_planner=weekend_planner,
+        fallback_search=fallback_search,
+        agent_orchestrator=None,
+        language_model_settings=language_model_settings,
+        pending_action_ttl_seconds=telegram_settings.PENDING_ACTION_LIFETIME_SECONDS,
+        dialog_history_limit=telegram_settings.DIALOG_HISTORY_LIMIT,
+    )
 
     container = ApplicationContainer(
         application_settings=get_application_settings(),
         database_settings=get_database_settings(),
         logging_settings=get_logging_settings(),
         web_settings=WebSettings(),
-        telegram_settings=TelegramSettings(BOT_TOKEN="", PAGE_SIZE=2, PUBLIC_WEB_BASE_URL="https://afisha.example.org"),
+        telegram_settings=telegram_settings,
+        language_model_settings=language_model_settings,
         database_engine_manager=database_engine_manager,
         event_repository=event_repository,
         raw_event_repository=raw_event_repository,
         dialog_repository=dialog_repository,
         administration_repository=administration_repository,
+        structured_extractor=structured_extractor,
+        agent_orchestrator=None,
         search_service=search_service,
         import_service=import_service,
         subscription_service=subscription_service,
         administration_service=administration_service,
+        weekend_planner=weekend_planner,
+        fallback_search=fallback_search,
+        agent_dialog_service=agent_dialog_service,
     )
 
     await seed_reference_catalog(database_engine_manager, catalog_path=DEFAULT_VENUES_CATALOG_PATH)
