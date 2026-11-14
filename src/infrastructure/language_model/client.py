@@ -1,9 +1,22 @@
 """Фабрика клиента OpenAI Agents SDK для OpenRouter и маппинг исключений."""
 
+from collections.abc import AsyncIterator, Mapping
 from typing import Final
 
 import openai
-from agents import ModelSettings, OpenAIChatCompletionsModel, RunConfig, set_tracing_disabled
+from agents import (
+    AgentOutputSchema,
+    AgentOutputSchemaBase,
+    Handoff,
+    Model,
+    ModelResponse,
+    ModelSettings,
+    OpenAIChatCompletionsModel,
+    RunConfig,
+    Tool,
+    TResponseInputItem,
+    set_tracing_disabled,
+)
 from agents.exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
@@ -14,7 +27,10 @@ from agents.exceptions import (
     OutputGuardrailTripwireTriggered,
     UserError,
 )
+from agents.items import TResponseStreamEvent
+from agents.models.interface import ModelTracing
 from openai import AsyncOpenAI
+from openai.types.responses import ResponsePromptParam
 from openai.types.shared import Reasoning
 
 from src.core.configuration import LanguageModelSettings
@@ -37,9 +53,11 @@ from src.core.exceptions import (
 from src.domain.exceptions import HallucinatedEventError, PromptInjectionDetectedError
 
 __all__ = [
+    "TwoStageSynthesisModel",
     "create_chat_model",
     "create_model_settings",
     "create_openai_client",
+    "create_orchestrator_model",
     "create_run_config",
     "map_language_model_exception",
     "supports_strict_json_schema",
@@ -67,6 +85,13 @@ def supports_strict_json_schema(model_name: str) -> bool:
     return "flash-lite" not in model_name.lower()
 
 
+def _resolve_base_url(settings: LanguageModelSettings) -> str:
+    """Возвращает целевой URL API провайдера с учётом предпочтения EU-региона OpenRouter."""
+    if settings.PREFER_EU_ENDPOINT and settings.BASE_URL == "https://openrouter.ai/api/v1":
+        return "https://eu.openrouter.ai/api/v1"
+    return settings.BASE_URL
+
+
 def create_openai_client(settings: LanguageModelSettings) -> AsyncOpenAI:
     """Создаёт асинхронный клиент `AsyncOpenAI`, настроенный на OpenRouter.
 
@@ -83,7 +108,7 @@ def create_openai_client(settings: LanguageModelSettings) -> AsyncOpenAI:
         raise AccessCredentialsInvalidError("Не задан API-ключ языковой модели (LANGUAGE_MODEL_API_KEY).")
 
     return AsyncOpenAI(
-        base_url=settings.BASE_URL,
+        base_url=_resolve_base_url(settings),
         api_key=settings.API_KEY,
         timeout=settings.REQUEST_TIMEOUT_SECONDS,
         max_retries=settings.MAX_RETRIES,
@@ -104,6 +129,110 @@ def create_chat_model(model_name: str, *, openai_client: AsyncOpenAI) -> OpenAIC
     return OpenAIChatCompletionsModel(model=model_name, openai_client=openai_client)
 
 
+def _has_tool_outputs(input_items: str | list[TResponseInputItem]) -> bool:
+    """Проверяет, содержит ли история входа результаты уже выполненных вызовов инструментов."""
+    if not isinstance(input_items, list):
+        return False
+    return any(isinstance(item, Mapping) and item.get("type") == "function_call_output" for item in input_items)
+
+
+def _relax_output_schema_for_fast(
+    output_schema: AgentOutputSchemaBase | None, fast_model_name: str
+) -> AgentOutputSchemaBase | None:
+    """Отключает `strict_json_schema` для моделей семейства `flash-lite` во избежание зацикливания."""
+    if output_schema is None or supports_strict_json_schema(fast_model_name):
+        return output_schema
+    if isinstance(output_schema, AgentOutputSchema) and output_schema.is_strict_json_schema():
+        return AgentOutputSchema(output_schema.output_type, strict_json_schema=False)
+    return output_schema
+
+
+class TwoStageSynthesisModel(Model):
+    """Двухэтапная модель: `PRIMARY` для планирования инструментов, `FAST` для финального синтеза."""
+
+    def __init__(
+        self, *, primary_model: OpenAIChatCompletionsModel, fast_model: OpenAIChatCompletionsModel, fast_model_name: str
+    ) -> None:
+        """Инициализирует двухэтапный маршрутизатор моделей."""
+        self._primary_model = primary_model
+        self._fast_model = fast_model
+        self._fast_model_name = fast_model_name
+
+    def _select_stage(
+        self, input_items: str | list[TResponseInputItem], output_schema: AgentOutputSchemaBase | None
+    ) -> tuple[OpenAIChatCompletionsModel, AgentOutputSchemaBase | None]:
+        if _has_tool_outputs(input_items):
+            return self._fast_model, _relax_output_schema_for_fast(output_schema, self._fast_model_name)
+        return self._primary_model, output_schema
+
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: ResponsePromptParam | None,
+    ) -> ModelResponse:
+        """Выбирает модель этапа (первичный вызов или синтез) и возвращает ответ."""
+        target_model, target_schema = self._select_stage(input, output_schema)
+        return await target_model.get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            target_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list[TResponseInputItem],
+        model_settings: ModelSettings,
+        tools: list[Tool],
+        output_schema: AgentOutputSchemaBase | None,
+        handoffs: list[Handoff],
+        tracing: ModelTracing,
+        *,
+        previous_response_id: str | None,
+        conversation_id: str | None,
+        prompt: ResponsePromptParam | None,
+    ) -> AsyncIterator[TResponseStreamEvent]:
+        """Стримит ответ модели выбранного этапа."""
+        target_model, target_schema = self._select_stage(input, output_schema)
+        return target_model.stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            target_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+
+def create_orchestrator_model(settings: LanguageModelSettings, *, openai_client: AsyncOpenAI) -> Model:
+    """Создаёт модель оркестратора (одноэтапную `PRIMARY` или двухэтапную `PRIMARY -> FAST`)."""
+    primary_model = create_chat_model(settings.PRIMARY, openai_client=openai_client)
+    if not settings.USE_FAST_SYNTHESIS_MODEL or settings.FAST == settings.PRIMARY:
+        return primary_model
+    fast_model = create_chat_model(settings.FAST, openai_client=openai_client)
+    return TwoStageSynthesisModel(primary_model=primary_model, fast_model=fast_model, fast_model_name=settings.FAST)
+
+
 def create_model_settings(
     settings: LanguageModelSettings, *, use_tools: bool = True, max_tokens: int | None = None
 ) -> ModelSettings:
@@ -117,6 +246,8 @@ def create_model_settings(
     Returns:
         Настроенный объект `ModelSettings` с `preserve_raw_usage=True`.
     """
+    provider_sort = settings.PROVIDER_SORT.strip()
+    extra_body = {"provider": {"sort": provider_sort, "allow_fallbacks": True}} if provider_sort else None
     return ModelSettings(
         temperature=0.0,
         preserve_raw_usage=True,
@@ -124,11 +255,12 @@ def create_model_settings(
         parallel_tool_calls=False if use_tools else None,
         max_tokens=max_tokens if max_tokens is not None else settings.MAX_OUTPUT_TOKENS,
         reasoning=Reasoning(effort="low"),
+        extra_body=extra_body,
     )
 
 
 def create_run_config(
-    *, model: OpenAIChatCompletionsModel, model_settings: ModelSettings, workflow_name: str = "cultural-meridian"
+    *, model: Model, model_settings: ModelSettings, workflow_name: str = "cultural-meridian"
 ) -> RunConfig:
     """Создаёт конфигурацию запуска `RunConfig` с отключённой отправкой трейсов.
 

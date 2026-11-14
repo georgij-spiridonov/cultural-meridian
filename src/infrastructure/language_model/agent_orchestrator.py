@@ -15,9 +15,9 @@ from src.domain.entities import AgentTurnResult, DialogSessionState, Event
 from src.domain.exceptions import HallucinatedEventError
 from src.domain.ports import AgentOrchestratorPort, AgentToolCallbacks
 from src.infrastructure.language_model.client import (
-    create_chat_model,
     create_model_settings,
     create_openai_client,
+    create_orchestrator_model,
     create_run_config,
     map_language_model_exception,
     supports_strict_json_schema,
@@ -31,7 +31,7 @@ __all__ = ["OpenAiAgentOrchestrator"]
 _MAX_RECOMMENDED_EVENTS = 5
 _HISTORY_LIMIT = 10
 
-_SYSTEM_PROMPT_TEMPLATE: Final[str] = """
+_STATIC_SYSTEM_PROMPT: Final[str] = """
 Ты доброжелательный и точный культурный афиша-помощник сервиса «Культурный меридиан» (Республика Башкортостан).
 Твоя задача — помогать жителям и гостям региона находить мероприятия, составлять маршруты выходного дня
 и оформлять запросы на подписку или обратную связь с организаторами.
@@ -48,16 +48,18 @@ CRITICAL_GROUNDING_RULE:
 3. Никогда не выдумывай названия мероприятий, площадки, даты, цены или идентификаторы UUID.
 4. Если подходящих мероприятий не найдено — честно сообщи об этом и предложи смягчить фильтры.
 
-Правила диалога:
-- Текущая опорная дата и время: {current_datetime_iso} (используй для «сегодня», «завтра», «на выходных»).
-- Канал обращения: {channel}.
+Правила диалога и краткости:
 - В ответе рекомендуй не более 5 мероприятий (`recommended_event_ids`).
-- Для каждого рекомендованного мероприятия дай краткое пояснение в 1–2 предложения в `explanations_by_event`.
+- Поле `answer_text` делай максимально лаконичным: 1–2 короткие вводные фразы с общим итогом подбора.
+  НЕ пересказывай в `answer_text` названия, цены, даты, адреса и описания каждого мероприятия —
+  пользователь увидит их в карточках и в `explanations_by_event`.
+- Для каждого рекомендованного мероприятия в `explanations_by_event` дай ровно 1 короткое предложение
+  (до 15–20 слов), почему оно подходит под запрос.
 - Если запрос слишком неоднозначен (например, неясен город или формат), задай не более одного уточняющего
   вопроса в `clarifying_question`.
 - Для подписки на уведомления вызывай `prepare_subscribe`, для обратной связи организатору —
   `prepare_feedback` и обязательно запрашивай явное подтверждение пользователя.
-{pending_action_note}
+- Используй опорную дату, канал и статус подтверждения из блока контекста в последнем сообщении пользователя.
 """.strip()
 
 
@@ -77,28 +79,23 @@ class _AgentTurnSchema(BaseModel):
     clarifying_question: str | None = None
 
 
-def _build_system_instructions(*, session_state: DialogSessionState, current_datetime: datetime) -> str:
-    """Формирует системный промпт на русском языке с опорным временем и контекстом сессии."""
-    pending_note = ""
-    if session_state.active_pending_action is not None:
-        pending_note = (
-            "- В сессии уже есть действие, ожидающее подтверждения: "
-            f"{session_state.active_pending_action.confirmation_prompt}"
-        )
-    return _SYSTEM_PROMPT_TEMPLATE.format(
-        current_datetime_iso=current_datetime.isoformat(),
-        channel=session_state.channel.value,
-        pending_action_note=pending_note,
-    )
-
-
-def _build_input_history(*, session_state: DialogSessionState, user_message: str) -> list[TResponseInputItem]:
-    """Собирает историю диалога (с сохранением последних >= 5 реплик) и текущий запрос пользователя."""
+def _build_input_history(
+    *, session_state: DialogSessionState, user_message: str, current_datetime: datetime
+) -> list[TResponseInputItem]:
+    """Собирает историю диалога и текущий запрос пользователя с динамическим контекстом сессии."""
     history_items: list[TResponseInputItem] = []
     recent_slice = session_state.recent_messages[-_HISTORY_LIMIT:]
     for message in recent_slice:
         history_items.append({"role": message.role, "content": message.content})
-    history_items.append({"role": "user", "content": user_message})
+
+    pending_note = ""
+    if session_state.active_pending_action is not None:
+        pending_note = f"; ожидает подтверждения: {session_state.active_pending_action.confirmation_prompt}"
+    contextual_user_message = (
+        f"[Контекст: дата и время {current_datetime.isoformat()}; канал {session_state.channel.value}{pending_note}]\n"
+        f"{user_message}"
+    )
+    history_items.append({"role": "user", "content": contextual_user_message})
     return history_items
 
 
@@ -178,14 +175,14 @@ class OpenAiAgentOrchestrator(AgentOrchestratorPort):
         started_at = time.perf_counter()
         effective_max_steps = max(1, min(maximum_steps, self._settings.MAX_AGENT_STEPS, _MAX_RECOMMENDED_EVENTS))
         client = self._openai_client or create_openai_client(self._settings)
-        model = create_chat_model(self._settings.PRIMARY, openai_client=client)
+        model = create_orchestrator_model(self._settings, openai_client=client)
         model_settings = create_model_settings(self._settings, use_tools=True)
         run_config = create_run_config(model=model, model_settings=model_settings, workflow_name="agent-orchestrator")
 
         strict_schema = supports_strict_json_schema(self._settings.PRIMARY)
         agent: Agent[AgentRunContext] = Agent(
             name="cultural-meridian-assistant",
-            instructions=_build_system_instructions(session_state=session_state, current_datetime=current_datetime),
+            instructions=_STATIC_SYSTEM_PROMPT,
             model=model,
             model_settings=model_settings,
             tools=build_agent_tools(),
@@ -195,7 +192,9 @@ class OpenAiAgentOrchestrator(AgentOrchestratorPort):
         )
 
         run_context = AgentRunContext(callbacks=tool_callbacks, maximum_steps=effective_max_steps)
-        input_items = _build_input_history(session_state=session_state, user_message=user_message)
+        input_items = _build_input_history(
+            session_state=session_state, user_message=user_message, current_datetime=current_datetime
+        )
         max_turns = effective_max_steps + 3
 
         try:

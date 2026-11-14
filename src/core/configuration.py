@@ -313,6 +313,9 @@ class LanguageModelSettings(BaseSettings):
         HTTP_REFERER: Заголовок `HTTP-Referer` для атрибуции запросов в OpenRouter.
         APP_TITLE: Заголовок `X-Title` для атрибуции приложения в OpenRouter.
         PROMPT_VERSION: Версия системного промпта агента для аудита и трассировки.
+        PREFER_EU_ENDPOINT: Переключать стандартный endpoint OpenRouter на EU-регион (`eu.openrouter.ai`).
+        PROVIDER_SORT: Стратегия сортировки провайдеров OpenRouter (`latency`, `throughput`, `price` или пусто).
+        USE_FAST_SYNTHESIS_MODEL: Использовать быструю модель (`FAST`) для синтеза ответа после инструментов.
     """
 
     model_config = SettingsConfigDict(
@@ -339,6 +342,9 @@ class LanguageModelSettings(BaseSettings):
     HTTP_REFERER: str = "https://cultural-meridian.local"
     APP_TITLE: str = "Cultural Meridian"
     PROMPT_VERSION: str = "v1.0"
+    PREFER_EU_ENDPOINT: bool = False
+    PROVIDER_SORT: str = "latency"
+    USE_FAST_SYNTHESIS_MODEL: bool = True
 
     @field_validator("BASE_URL", "HTTP_REFERER", mode="after")
     @classmethod
