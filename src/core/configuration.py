@@ -332,7 +332,7 @@ class LanguageModelSettings(BaseSettings):
     REQUEST_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0.0)
     MAX_RETRIES: int = Field(default=1, ge=0, le=5)
     MAX_AGENT_STEPS: int = Field(default=5, ge=1, le=5)
-    MAX_OUTPUT_TOKENS: int = Field(default=800, ge=64, le=4096)
+    MAX_OUTPUT_TOKENS: int = Field(default=2048, ge=64, le=4096)
     USER_DAILY_BUDGET_RUBLES: float = Field(default=15.0, ge=0.0)
     GLOBAL_DAILY_BUDGET_RUBLES: float = Field(default=250.0, ge=0.0)
     USD_TO_RUB_RATE: float = Field(default=90.0, gt=0.0)
