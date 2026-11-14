@@ -1,0 +1,142 @@
+{% set surface = notification_surface | default("subscriptions") %}
+{% set limit = notification_limit | default(3 if surface == "catalog" else 20) %}
+{% set unread_count = unread_subscription_count | default(0) %}
+{% set items = subscription_notifications | default(()) %}
+
+{% if surface == "catalog" and not items %}
+  <div
+    id="subscription-notifications-section"
+    class="sub-notifications sub-notifications--empty-slot"
+    hx-get="/partials/subscription-notifications?surface={{ surface }}&limit={{ limit }}"
+    hx-trigger="subscriptionsChanged from:body"
+    hx-swap="outerHTML"
+  >
+    <div class="visually-hidden" role="status" aria-live="polite">
+      {% if notification_feedback %}{{ notification_feedback }}{% endif %}
+    </div>
+  </div>
+{% else %}
+  <section
+    id="subscription-notifications-section"
+    class="sub-notifications {% if surface == 'catalog' %}sub-notifications--catalog{% endif %}"
+    aria-labelledby="subscription-notifications-heading"
+    hx-get="/partials/subscription-notifications?surface={{ surface }}&limit={{ limit }}"
+    hx-trigger="subscriptionsChanged from:body"
+    hx-swap="outerHTML"
+  >
+    <div class="sub-notifications__header">
+      <div class="sub-notifications__title-wrap">
+        <h2 id="subscription-notifications-heading" class="sub-notifications__title">
+          Новое по вашим подпискам
+        </h2>
+        {% if unread_count > 0 %}
+          <span class="badge badge--category" aria-label="Непрочитанных уведомлений: {{ unread_count }}">
+            {{ unread_count }}
+          </span>
+        {% endif %}
+        <span id="sub-notifications-loading" class="htmx-indicator badge badge--neutral">Обновление…</span>
+      </div>
+
+      <div class="sub-notifications__actions">
+        {% if surface == "catalog" %}
+          <a class="button button--small button--ghost" href="/subscriptions">Все подписки</a>
+        {% endif %}
+
+        {% if items %}
+          <form
+            action="/subscriptions/notifications/read-all?surface={{ surface }}&limit={{ limit }}"
+            method="post"
+            hx-post="/subscriptions/notifications/read-all?surface={{ surface }}&limit={{ limit }}"
+            hx-target="#subscription-notifications-section"
+            hx-swap="outerHTML"
+            hx-indicator="#sub-notifications-loading"
+          >
+            <input type="hidden" name="surface" value="{{ surface }}" />
+            <input type="hidden" name="limit" value="{{ limit }}" />
+            <button class="button button--small button--ghost" type="submit">
+              Отметить всё прочитанным
+            </button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if notification_feedback %}
+      <div class="alert alert--success sub-notifications__feedback" role="status" aria-live="polite">
+        {{ notification_feedback }}
+      </div>
+    {% else %}
+      <div class="visually-hidden" role="status" aria-live="polite"></div>
+    {% endif %}
+
+    {% if items %}
+      <div class="sub-notifications__grid {% if surface == 'catalog' %}sub-notifications__grid--compact{% endif %}">
+        {% for item in items %}
+          <article class="sub-notification-card">
+            <div>
+              <div class="sub-notification-card__badges">
+                <span class="badge badge--category">{{ category_labels[item.event.category] }}</span>
+                {% if item.event.is_free %}
+                  <span class="badge badge--free">Бесплатно</span>
+                {% endif %}
+                <span class="badge badge--neutral">{{ item.event.age_limit }}+</span>
+              </div>
+
+              <h3 class="sub-notification-card__title">
+                <a href="/events/{{ item.event.identifier }}">{{ item.event.title }}</a>
+              </h3>
+
+              <ul class="event-card__meta">
+                <li><strong>Когда:</strong> {{ format_date_range(item.event) }}</li>
+                <li><strong>Где:</strong> {{ item.event.city }}, {{ item.event.venue }}</li>
+                {% if surface == "subscriptions" %}
+                  <li><strong>Получено:</strong> {{ format_notification_time(item.created_at) }}</li>
+                {% endif %}
+              </ul>
+            </div>
+
+            <div class="sub-notification-card__footer">
+              <span class="event-card__price">{{ format_price(item.event) }}</span>
+              <div class="sub-notification-card__actions">
+                <a class="button button--small button--primary" href="/events/{{ item.event.identifier }}">
+                  Подробнее
+                </a>
+                <form
+                  action="/subscriptions/notifications/{{ item.notification_identifier }}/read?surface={{ surface }}&limit={{ limit }}"
+                  method="post"
+                  hx-post="/subscriptions/notifications/{{ item.notification_identifier }}/read?surface={{ surface }}&limit={{ limit }}"
+                  hx-target="#subscription-notifications-section"
+                  hx-swap="outerHTML"
+                  hx-indicator="#sub-notifications-loading"
+                >
+                  <input type="hidden" name="surface" value="{{ surface }}" />
+                  <input type="hidden" name="limit" value="{{ limit }}" />
+                  <button
+                    class="button button--small"
+                    type="submit"
+                    aria-label="Отметить уведомление «{{ item.event.title }}» прочитанным"
+                  >
+                    Прочитано
+                  </button>
+                </form>
+              </div>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="alert alert--info sub-notifications__empty" role="status">
+        Новых уведомлений пока нет — новые подходящие мероприятия появятся здесь сразу после публикации.
+      </div>
+    {% endif %}
+  </section>
+{% endif %}
+
+{% if oob_nav_badge %}
+  <span
+    id="nav-subscriptions-badge"
+    class="nav-badge"
+    hx-swap-oob="outerHTML"
+    {% if unread_count <= 0 %}hidden{% endif %}
+  >{% if unread_count > 0 %}<span aria-hidden="true">{{ unread_count if unread_count <= 99 else "99+" }}</span><span class="visually-hidden"> (непрочитанных уведомлений: {{ unread_count }})</span>{% endif %}</span>
+{% endif %}

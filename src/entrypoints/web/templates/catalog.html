@@ -3,6 +3,10 @@
 {% block title %}Каталог мероприятий Башкортостана — Культурный Меридиан{% endblock %}
 
 {% block content %}
+  {% if subscription_notifications %}
+    {% include "partials/subscription_notifications.html" %}
+  {% endif %}
+
   <section class="filter-panel" aria-label="Фильтры поиска мероприятий">
     <form
       action="/"

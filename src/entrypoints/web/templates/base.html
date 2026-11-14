@@ -48,12 +48,18 @@
           >
             Планировщик выходных
           </a>
+          {% set unread_count = unread_subscription_count | default(0) %}
           <a
             class="primary-nav__link {% if active_nav == 'subscriptions' %}primary-nav__link--active{% endif %}"
             href="/subscriptions"
             {% if active_nav == 'subscriptions' %}aria-current="page"{% endif %}
           >
-            Подписки и обратная связь
+            <span>Подписки и обратная связь</span>
+            <span
+              id="nav-subscriptions-badge"
+              class="nav-badge"
+              {% if unread_count <= 0 %}hidden{% endif %}
+            >{% if unread_count > 0 %}<span aria-hidden="true">{{ unread_count if unread_count <= 99 else "99+" }}</span><span class="visually-hidden"> (непрочитанных уведомлений: {{ unread_count }})</span>{% endif %}</span>
           </a>
           <a
             class="primary-nav__link {% if active_nav == 'assistant' %}primary-nav__link--active{% endif %}"
