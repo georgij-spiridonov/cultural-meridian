@@ -1,0 +1,70 @@
+{
+  "source": "sterlitamak_afisha_api",
+  "generated_at": "2026-11-14T12:00:00+05:00",
+  "items": [
+    {
+      "external_id": "str-api-2026-12-19-twelve-months",
+      "title": "Премьера спектакля «Двенадцать месяцев» (6+)",
+      "description": "Новогодняя сказка для всей семьи по пьесе С. Я. Маршака в постановке Стерлитамакского государственного русского драматического театра.",
+      "date_start": "2026-12-19T12:00:00+05:00",
+      "city": "Стерлитамак",
+      "venue": "Стерлитамакский государственный русский драматический театр",
+      "address": "ул. Худайбердина, 18",
+      "category": "spectacle",
+      "price_text": "от 350 до 650 ₽",
+      "age_limit": "6+",
+      "language": "русский",
+      "url": "data/local_feeds/cards/sterlitamak_twelve_months.html",
+      "organization_link": "https://rusdramteatr.ru",
+      "status": "active"
+    },
+    {
+      "external_id": "str-api-2026-12-10-painting-exhibition",
+      "title": "Зимняя выставка живописи художников Южного Урала (0+)",
+      "description": "Экспозиция зимних пейзажей и графики мастеров Башкортостана в залах Стерлитамакской картинной галереи.",
+      "date_start": "2026-12-10T11:00:00+05:00",
+      "city": "Стерлитамак",
+      "venue": "Стерлитамакская картинная галерея",
+      "address": "ул. Коммунистическая, 84",
+      "category": "exhibition",
+      "price_text": "Вход свободный",
+      "age_limit": "0+",
+      "language": "русский",
+      "url": "data/local_feeds/cards/sterlitamak_painting_exhibition.html",
+      "organization_link": "https://artgallery-str.ru",
+      "status": "active"
+    },
+    {
+      "external_id": "str-api-2026-12-14-canceled-romances",
+      "title": "[ОТМЕНЕНО] Камерный вечер романсов при свечах",
+      "description": "Мероприятие отменено по техническим причинам площадки, приобретённые билеты подлежат полному возврату в кассе.",
+      "date_start": "2026-12-14T19:00:00+05:00",
+      "city": "Стерлитамак",
+      "venue": "Стерлитамакское государственное театрально-концертное объединение",
+      "address": "пр. Ленина, 30В",
+      "category": "concert",
+      "price_text": "500 ₽",
+      "age_limit": "12+",
+      "language": "русский",
+      "url": "data/local_feeds/cards/sterlitamak_canceled_romances.html",
+      "organization_link": "https://sgtko.ru",
+      "status": "canceled"
+    },
+    {
+      "external_id": "str-api-2026-12-20-winter-tale-dup",
+      "title": "Зимняя сказка Урала",
+      "description": "Гастрольная праздничная программа в Уфе: объединённый семейный показ на сцене ГКЗ «Башкортостан» (данные регионального агрегатора).",
+      "date_text": "20 декабря 2026, 18:30",
+      "city": "Уфа",
+      "venue": "ГКЗ «Башкортостан»",
+      "address": "ул. Ленина, 50",
+      "category": "spectacle",
+      "price_text": "от 450 до 1400 рублей",
+      "age_limit": "6+",
+      "language": "русский",
+      "url": "data/local_feeds/cards/ufa_winter_tale_json.html",
+      "organization_link": "https://gkzbashkortostan.ru",
+      "status": "active"
+    }
+  ]
+}

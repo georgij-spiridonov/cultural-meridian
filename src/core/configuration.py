@@ -16,6 +16,7 @@ __all__ = [
     "ApplicationSettings",
     "DatabaseSettings",
     "GeolocationSettings",
+    "IngestionSettings",
     "LanguageModelSettings",
     "LoggingSettings",
     "TelegramSettings",
@@ -23,6 +24,7 @@ __all__ = [
     "get_application_settings",
     "get_database_settings",
     "get_geolocation_settings",
+    "get_ingestion_settings",
     "get_language_model_settings",
     "get_logging_settings",
     "get_telegram_settings",
@@ -475,6 +477,81 @@ class GeolocationSettings(BaseSettings):
             Очищенная строка заголовка.
         """
         return value.strip()
+
+
+class IngestionSettings(BaseSettings):
+    """Настройки агента сбора данных, фонового воркера и офлайн-валидации фидов.
+
+    Attributes:
+        SOURCES_CONFIG_PATH: Путь к YAML-реестру источников афиш.
+        LOCAL_FEEDS_DIRECTORY: Директория локальных тестовых фидов для офлайн-сбора.
+        POLL_INTERVAL_SECONDS: Интервал между регулярными прогонами сбора источников в секундах.
+        REQUEST_TIMEOUT_SECONDS: Таймаут HTTP-запроса при загрузке источника в секундах.
+        LINK_CHECK_TIMEOUT_SECONDS: Таймаут HTTP-проверки доступности ссылки события в секундах.
+        CONFIDENCE_THRESHOLD: Минимальный порог уверенности нормализации для публикации без модерации.
+        HYBRID_LLM_ENABLED: Признак включения быстрой языковой модели для сложных и неполных записей.
+        VERIFY_LOCAL_FILE_LINKS: Признак проверки существования локальных ссылок на диске при офлайн-сборе.
+        REPROCESS_BATCH_LIMIT: Максимальное число сырых записей за один пакет повторной нормализации.
+        USER_AGENT: Заголовок `User-Agent` для запросов фонового сборщика и проверщика ссылок.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        env_prefix="INGESTION_",
+        extra="ignore",
+        env_ignore_empty=True,
+        frozen=True,
+    )
+
+    SOURCES_CONFIG_PATH: Path = Field(default=PROJECT_ROOT / "configuration" / "sources.yaml")
+    LOCAL_FEEDS_DIRECTORY: Path = Field(default=PROJECT_ROOT / "data" / "local_feeds")
+    POLL_INTERVAL_SECONDS: int = Field(default=900, ge=10)
+    REQUEST_TIMEOUT_SECONDS: float = Field(default=5.0, gt=0.0, le=60.0)
+    LINK_CHECK_TIMEOUT_SECONDS: float = Field(default=4.0, gt=0.0, le=30.0)
+    CONFIDENCE_THRESHOLD: float = Field(default=0.75, ge=0.0, le=1.0)
+    HYBRID_LLM_ENABLED: bool = True
+    VERIFY_LOCAL_FILE_LINKS: bool = True
+    REPROCESS_BATCH_LIMIT: int = Field(default=100, ge=1, le=1000)
+    USER_AGENT: str = "cultural-meridian-bot/1.0 (+https://cultural-meridian.local)"
+
+    @field_validator("SOURCES_CONFIG_PATH", "LOCAL_FEEDS_DIRECTORY", mode="after")
+    @classmethod
+    def resolve_ingestion_path(cls, path_value: Path) -> Path:
+        """Преобразует относительный путь конфигурации сбора или локальных фидов в абсолютный от корня проекта.
+
+        Arguments:
+            path_value: Путь к файлу реестра источников или директории локальных фидов.
+
+        Returns:
+            Абсолютный путь от корня проекта.
+        """
+        if path_value.is_absolute():
+            return path_value
+        return PROJECT_ROOT / path_value
+
+    @field_validator("USER_AGENT", mode="after")
+    @classmethod
+    def strip_user_agent(cls, value: str) -> str:
+        """Удаляет крайние пробелы у заголовка `User-Agent`.
+
+        Arguments:
+            value: Исходное значение заголовка `User-Agent`.
+
+        Returns:
+            Очищенная строка заголовка.
+        """
+        return value.strip()
+
+
+@lru_cache
+def get_ingestion_settings() -> IngestionSettings:
+    """Возвращает кэшированный экземпляр настроек сбора и нормализации источников.
+
+    Returns:
+        Неизменяемые настройки фонового сборщика данных.
+    """
+    return IngestionSettings()
 
 
 @lru_cache

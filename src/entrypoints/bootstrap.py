@@ -8,15 +8,18 @@ from src.application import (
     AdministrationService,
     AgentDialogService,
     EventImportService,
+    EventIngestionService,
     EventSearchService,
     FallbackSearchService,
     SubscriptionService,
     WeekendPlannerService,
 )
 from src.core.configuration import (
+    PROJECT_ROOT,
     ApplicationSettings,
     DatabaseSettings,
     GeolocationSettings,
+    IngestionSettings,
     LanguageModelSettings,
     LoggingSettings,
     TelegramSettings,
@@ -24,6 +27,7 @@ from src.core.configuration import (
     get_application_settings,
     get_database_settings,
     get_geolocation_settings,
+    get_ingestion_settings,
     get_language_model_settings,
     get_logging_settings,
     get_telegram_settings,
@@ -39,6 +43,7 @@ from src.infrastructure.database import (
 )
 from src.infrastructure.geolocation import HybridGeolocationResolver
 from src.infrastructure.language_model import OpenAiAgentOrchestrator, OpenAiStructuredExtractor, create_openai_client
+from src.infrastructure.sources import CompositeSourceFetcher, HttpLinkChecker
 
 __all__ = ["ApplicationContainer", "build_application_container"]
 
@@ -72,6 +77,10 @@ class ApplicationContainer:
         agent_dialog_service: Оркестратор многошагового диалога с ИИ-агентом и фоллбэком.
         geolocation_settings: Настройки геолокации, справочника координат и оценки переездов.
         geolocation_resolver: Гибридный адаптер геокодирования и расчёта времени в пути.
+        ingestion_settings: Настройки агента сбора данных, фонового воркера и валидации фидов.
+        source_fetcher: Маршрутизирующий загрузчик внешних и локальных источников (RSS, JSON, HTML).
+        link_checker: Адаптер проверки доступности ссылок на первоисточники.
+        event_ingestion_service: Прикладной конвейер сбора, гибридной нормализации и дедупликации.
     """
 
     application_settings: ApplicationSettings
@@ -96,6 +105,10 @@ class ApplicationContainer:
     agent_dialog_service: AgentDialogService
     geolocation_settings: GeolocationSettings = field(default_factory=get_geolocation_settings)
     geolocation_resolver: HybridGeolocationResolver | None = None
+    ingestion_settings: IngestionSettings = field(default_factory=get_ingestion_settings)
+    source_fetcher: CompositeSourceFetcher | None = None
+    link_checker: HttpLinkChecker | None = None
+    event_ingestion_service: EventIngestionService | None = None
     _openai_client: AsyncOpenAI | None = field(default=None, repr=False)
 
     async def startup(self) -> None:
@@ -105,7 +118,11 @@ class ApplicationContainer:
         logger.info("Контейнер зависимостей приложения запущен.")
 
     async def shutdown(self) -> None:
-        """Корректно закрывает подключения к базе данных, геокодеру, LLM-клиенту и освобождает ресурсы."""
+        """Корректно закрывает подключения к БД, сборщику, проверщику ссылок, геокодеру и LLM-клиенту."""
+        if self.source_fetcher is not None:
+            await self.source_fetcher.close()
+        if self.link_checker is not None:
+            await self.link_checker.close()
         if self.geolocation_resolver is not None:
             await self.geolocation_resolver.close()
         if self._openai_client is not None:
@@ -123,6 +140,7 @@ def build_application_container(
     telegram_settings: TelegramSettings | None = None,
     language_model_settings: LanguageModelSettings | None = None,
     geolocation_settings: GeolocationSettings | None = None,
+    ingestion_settings: IngestionSettings | None = None,
 ) -> ApplicationContainer:
     """Собирает граф зависимостей приложения поверх настроек окружения.
 
@@ -134,6 +152,7 @@ def build_application_container(
         telegram_settings: Явная переопределённая конфигурация Telegram-бота.
         language_model_settings: Явная переопределённая конфигурация языковой модели.
         geolocation_settings: Явная переопределённая конфигурация геолокации.
+        ingestion_settings: Явная переопределённая конфигурация фонового сбора и проверки источников.
 
     Returns:
         Полностью настроенный экземпляр `ApplicationContainer`.
@@ -145,6 +164,7 @@ def build_application_container(
     resolved_telegram_settings = telegram_settings or get_telegram_settings()
     resolved_language_model_settings = language_model_settings or get_language_model_settings()
     resolved_geolocation_settings = geolocation_settings or get_geolocation_settings()
+    resolved_ingestion_settings = ingestion_settings or get_ingestion_settings()
 
     engine_manager = DatabaseEngineManager(resolved_database_settings)
 
@@ -167,6 +187,29 @@ def build_application_container(
 
     geolocation_resolver = HybridGeolocationResolver(
         settings=resolved_geolocation_settings, event_repository=event_repository
+    )
+
+    source_fetcher = CompositeSourceFetcher(
+        project_root=PROJECT_ROOT,
+        local_feeds_directory=resolved_ingestion_settings.LOCAL_FEEDS_DIRECTORY,
+        user_agent=resolved_ingestion_settings.USER_AGENT,
+    )
+    link_checker = HttpLinkChecker(
+        user_agent=resolved_ingestion_settings.USER_AGENT,
+        default_timeout_seconds=resolved_ingestion_settings.LINK_CHECK_TIMEOUT_SECONDS,
+        project_root=PROJECT_ROOT,
+        local_feeds_directory=resolved_ingestion_settings.LOCAL_FEEDS_DIRECTORY,
+        verify_local_file_links=resolved_ingestion_settings.VERIFY_LOCAL_FILE_LINKS,
+    )
+    event_ingestion_service = EventIngestionService(
+        source_fetcher=source_fetcher,
+        link_checker=link_checker,
+        raw_event_repository=raw_event_repository,
+        event_repository=event_repository,
+        administration_repository=administration_repository,
+        structured_extractor=structured_extractor if resolved_ingestion_settings.HYBRID_LLM_ENABLED else None,
+        confidence_threshold=resolved_ingestion_settings.CONFIDENCE_THRESHOLD,
+        link_check_timeout_seconds=resolved_ingestion_settings.LINK_CHECK_TIMEOUT_SECONDS,
     )
 
     search_service = EventSearchService(event_repository=event_repository)
@@ -220,5 +263,9 @@ def build_application_container(
         agent_dialog_service=agent_dialog_service,
         geolocation_settings=resolved_geolocation_settings,
         geolocation_resolver=geolocation_resolver,
+        ingestion_settings=resolved_ingestion_settings,
+        source_fetcher=source_fetcher,
+        link_checker=link_checker,
+        event_ingestion_service=event_ingestion_service,
         _openai_client=openai_client,
     )
