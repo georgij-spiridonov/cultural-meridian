@@ -913,6 +913,21 @@ class PostgreSqlEventRepository(EventRepositoryPort):
             rows = (await session.execute(statement)).scalars().unique().all()
             return tuple(map_city_from_row(row) for row in rows)
 
+    async def list_languages(self) -> tuple[str, ...]:
+        """Возвращает отсортированный список языков опубликованных мероприятий."""
+        statement = (
+            select(EventRow.language)
+            .where(EventRow.status == EventStatus.PUBLISHED.value, EventRow.language.is_not(None))
+            .distinct()
+            .order_by(EventRow.language.asc())
+        )
+        async with (
+            handle_database_errors(operation="чтение справочника языков"),
+            self._engine_manager.session() as session,
+        ):
+            rows = (await session.execute(statement)).scalars().all()
+            return tuple(language for language in rows if language)
+
     async def list_venues(self, *, city: str | None = None) -> tuple[VenueReference, ...]:
         """Возвращает справочник культурных площадок с фильтрацией по городу.
 

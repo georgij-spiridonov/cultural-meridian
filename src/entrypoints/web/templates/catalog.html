@@ -157,20 +157,14 @@
 
           <div class="form-field">
             <label class="form-label" for="filter-language">Язык проведения</label>
-            {% set effective_language_options = language_options if language_options is defined and language_options else [
-              ('русский', 'Русский'),
-              ('башкирский', 'Башкирский'),
-              ('татарский', 'Татарский'),
-              ('английский', 'Английский')
-            ] %}
             <select id="filter-language" class="form-control" name="language">
               <option value="">Любой язык</option>
-              {% for value, label in effective_language_options %}
+              {% for value, label in language_options %}
                 <option value="{{ value }}" {% if parameters.language == value %}selected{% endif %}>
                   {{ label }}
                 </option>
               {% endfor %}
-              {% if parameters.language and parameters.language not in effective_language_options | map(attribute=0) | list %}
+              {% if parameters.language and parameters.language not in language_options | map(attribute=0) | list %}
                 <option value="{{ parameters.language }}" selected>{{ parameters.language }}</option>
               {% endif %}
             </select>

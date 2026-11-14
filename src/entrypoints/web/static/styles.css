@@ -1033,10 +1033,14 @@ dialog::backdrop {
   min-width: 0;
 }
 
+.split-grid > .panel-card + .panel-card {
+  margin-top: 0;
+}
+
 @media (min-width: 920px) {
   .split-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
+    align-items: stretch;
   }
 }
 

@@ -150,6 +150,17 @@ class EventRepositoryPort(Protocol):
         """
         ...
 
+    async def list_languages(self) -> tuple[str, ...]:
+        """Возвращает отсортированный список языков опубликованных мероприятий.
+
+        Returns:
+            Кортеж нормализованных названий языков.
+
+        Raises:
+            InfrastructureException: При ошибке чтения языков мероприятий.
+        """
+        ...
+
     async def list_venues(self, *, city: str | None = None) -> tuple[VenueReference, ...]:
         """Возвращает справочник культурных площадок с фильтрацией по городу.
 
