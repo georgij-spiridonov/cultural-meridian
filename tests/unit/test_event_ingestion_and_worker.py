@@ -638,7 +638,9 @@ sources:
     fetcher = _StubSourceFetcher(items_by_source={"ufa_rss": (_make_complete_item(),)})
     link_checker = _StubLinkChecker()
     service, _, event_repo, admin_repo = _build_service(fetcher=fetcher, link_checker=link_checker)
-    settings = IngestionSettings(_env_file=None, SOURCES_CONFIG_PATH=sources_yaml, POLL_INTERVAL_SECONDS=15)
+    settings = IngestionSettings(
+        _env_file=None, SOURCES_CONFIG_PATH=sources_yaml, POLL_INTERVAL_SECONDS=15, ENABLE_EXTERNAL_SOURCES=True
+    )
     fake_container = _FakeWorkerContainer(ingestion_settings=settings, event_ingestion_service=service)
 
     runner = BackgroundWorkerRunner(cast(ApplicationContainer, fake_container), sources_config_path=sources_yaml)
@@ -678,7 +680,9 @@ sources:
     fetcher = _StubSourceFetcher(items_by_source={"ufa_rss": (_make_complete_item(),)})
     link_checker = _StubLinkChecker()
     service, _, event_repo, admin_repo = _build_service(fetcher=fetcher, link_checker=link_checker)
-    settings = IngestionSettings(_env_file=None, SOURCES_CONFIG_PATH=sources_yaml, POLL_INTERVAL_SECONDS=15)
+    settings = IngestionSettings(
+        _env_file=None, SOURCES_CONFIG_PATH=sources_yaml, POLL_INTERVAL_SECONDS=15, ENABLE_EXTERNAL_SOURCES=True
+    )
     fake_container = _FakeWorkerContainer(ingestion_settings=settings, event_ingestion_service=service)
     monkeypatch.setattr("src.entrypoints.background_worker.runner.build_application_container", lambda: fake_container)
 
@@ -711,10 +715,60 @@ sources:
     )
     fetcher = _StubSourceFetcher(errors_by_source={"broken_rss": ServiceUnavailableError("HTTP 500")})
     service, _, _, _ = _build_service(fetcher=fetcher)
-    settings = IngestionSettings(_env_file=None, SOURCES_CONFIG_PATH=sources_yaml)
+    settings = IngestionSettings(_env_file=None, SOURCES_CONFIG_PATH=sources_yaml, ENABLE_EXTERNAL_SOURCES=True)
     fake_container = _FakeWorkerContainer(ingestion_settings=settings, event_ingestion_service=service)
 
     exit_code = await run_background_worker(
         container=cast(ApplicationContainer, fake_container), once=True, manage_lifecycle=False
     )
     assert exit_code == 1
+
+
+async def test_background_worker_skips_external_sources_by_default(tmp_path: Path) -> None:
+    """Проверяет, что при `ENABLE_EXTERNAL_SOURCES=False` опрашиваются только локальные фиды."""
+    sources_yaml = tmp_path / "sources.yaml"
+    sources_yaml.write_text(
+        """
+sources:
+  - name: local_rss
+    source_type: rss
+    source_url: data/local_feeds/ufa_afisha.rss.xml
+    default_city: Уфа
+    is_enabled: true
+  - name: external_web
+    source_type: webpage
+    source_url: https://example.org/afisha
+    default_city: Уфа
+    is_enabled: true
+""".strip(),
+        encoding="utf-8",
+    )
+    fetcher = _StubSourceFetcher(
+        items_by_source={
+            "local_rss": (
+                _make_complete_item(source_name="local_rss", external_id="local-1", title="Локальный концерт"),
+            ),
+            "external_web": (
+                _make_complete_item(
+                    source_name="external_web",
+                    source_type=SourceType.WEBPAGE,
+                    external_id="ext-1",
+                    title="Внешний спектакль",
+                ),
+            ),
+        }
+    )
+    service, _, _, _ = _build_service(fetcher=fetcher)
+    settings = IngestionSettings(_env_file=None, SOURCES_CONFIG_PATH=sources_yaml)
+    assert settings.ENABLE_EXTERNAL_SOURCES is False
+    fake_container = _FakeWorkerContainer(ingestion_settings=settings, event_ingestion_service=service)
+
+    runner = BackgroundWorkerRunner(cast(ApplicationContainer, fake_container), sources_config_path=sources_yaml)
+    report = await runner.run_once(current_time=_REFERENCE_NOW)
+    assert report.sources_processed == 1
+    assert report.items_published == 1
+
+    # Точечный запуск через --source работает даже при выключенных внешних источниках.
+    targeted_report = await runner.run_once(current_time=_REFERENCE_NOW, source_name="external_web")
+    assert targeted_report.sources_processed == 1
+    assert targeted_report.items_published == 1

@@ -178,6 +178,7 @@ class SourceDefinition:
         source_url: URL или путь к локальному фиду источника.
         default_city: Город по умолчанию, если он не указан в отдельной записи фида.
         default_category: Категория по умолчанию для специализированных площадок.
+        default_venue: Площадка по умолчанию для мероприятий в городе источника, как она названа в справочнике.
         is_enabled: Признак активности источника при плановом сборе.
         request_timeout_seconds: Максимальное время ожидания сетевого ответа в секундах.
     """
@@ -187,6 +188,7 @@ class SourceDefinition:
     source_url: str
     default_city: str | None = None
     default_category: EventCategory | None = None
+    default_venue: str | None = None
     is_enabled: bool = True
     request_timeout_seconds: float = 5.0
 

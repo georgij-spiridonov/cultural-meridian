@@ -9,8 +9,10 @@ import httpx
 from src.core.configuration import PROJECT_ROOT
 from src.core.exceptions import ValidationSchemaError
 from src.domain.entities import FetchedSourceItem, SourceDefinition
+from src.infrastructure.sources.http_client import PoliteHttpClient
 from src.infrastructure.sources.registry import (
     DEFAULT_SOURCE_USER_AGENT,
+    create_standalone_polite_client,
     decode_utf8_content,
     extract_age_text,
     extract_scalar_text,
@@ -73,42 +75,31 @@ class JsonSourceFetcher:
         default_timeout_seconds: float = 5.0,
         project_root: Path = PROJECT_ROOT,
         local_feeds_directory: Path | None = None,
+        polite_client: PoliteHttpClient | None = None,
     ) -> None:
-        """Инициализирует JSON-загрузчик с опциональным HTTP-клиентом или транспортом.
+        """Инициализирует JSON-загрузчик.
 
         Arguments:
             http_client: Внешний экземпляр `httpx.AsyncClient` (не закрывается при `close()`).
             transport: Опциональный транспорт `httpx` для изолированного тестирования.
             user_agent: Значение HTTP-заголовка `User-Agent`.
-            default_timeout_seconds: Таймаут HTTP-клиента по умолчанию в секундах.
+            default_timeout_seconds: Устаревший параметр; таймаут задаётся в описании источника.
             project_root: Корневая директория проекта для безопасного чтения локальных файлов.
             local_feeds_directory: Дополнительная директория локальных фидов.
+            polite_client: Общий вежливый HTTP-клиент сборщика; без него создаётся собственный.
         """
-        self._http_client = http_client
-        self._owns_http_client = http_client is None
-        self._transport = transport
-        self._user_agent = user_agent
-        self._default_timeout_seconds = default_timeout_seconds
+        del default_timeout_seconds
+        self._owns_polite_client = polite_client is None
+        self._polite_client = polite_client or create_standalone_polite_client(
+            user_agent=user_agent, http_client=http_client, transport=transport
+        )
         self._project_root = project_root
         self._local_feeds_directory = local_feeds_directory
 
-    def _get_or_create_http_client(self) -> httpx.AsyncClient:
-        """Возвращает переданный или лениво созданный асинхронный HTTP-клиент."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self._default_timeout_seconds),
-                headers={"User-Agent": self._user_agent},
-                follow_redirects=True,
-                transport=self._transport,
-            )
-            self._owns_http_client = True
-        return self._http_client
-
     async def close(self) -> None:
-        """Закрывает внутренний `httpx.AsyncClient`, если он был создан самим загрузчиком."""
-        if self._owns_http_client and self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+        """Закрывает собственный HTTP-клиент, если он был создан самим загрузчиком."""
+        if self._owns_polite_client:
+            await self._polite_client.close()
 
     async def fetch_items(self, *, source: SourceDefinition) -> tuple[FetchedSourceItem, ...]:
         """Загружает, валидирует и преобразует JSON-фид в кортеж `FetchedSourceItem`.
@@ -128,8 +119,7 @@ class JsonSourceFetcher:
         """
         raw_bytes = await fetch_source_bytes(
             source=source,
-            get_http_client=self._get_or_create_http_client,
-            user_agent=self._user_agent,
+            http_client=self._polite_client,
             project_root=self._project_root,
             local_feeds_directory=self._local_feeds_directory,
         )

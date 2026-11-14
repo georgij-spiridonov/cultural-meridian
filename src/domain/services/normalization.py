@@ -41,23 +41,25 @@ DEFAULT_BASHKORTOSTAN_CITIES: Final[Mapping[str, tuple[str, ...]]] = MappingProx
             "стерлитакмак",
             "стерлитакмае",
             "стерлитомак",
+            "sterlitamak",
         ),
-        "Салават": ("салават", "салавате", "салавата", "салавату"),
-        "Нефтекамск": ("нефтекамск", "нефтекамске", "нефтекамска", "нефтикамск"),
-        "Октябрьский": ("октябрьский", "октябрьском", "октябрьского", "октябрьскому"),
-        "Белорецк": ("белорецк", "белорецке", "белорецка"),
-        "Туймазы": ("туймазы", "туймазах", "туймазов"),
-        "Ишимбай": ("ишимбай", "ишимбае", "ишимбая"),
-        "Кумертау": ("кумертау",),
-        "Сибай": ("сибай", "сибае", "сибая"),
-        "Мелеуз": ("мелеуз", "мелеузе", "мелеуза"),
-        "Белебей": ("белебей", "белебее", "белебея"),
-        "Бирск": ("бирск", "бирске", "бирска"),
-        "Благовещенск": ("благовещенск", "благовещенске", "благовещенска"),
-        "Учалы": ("учалы", "учалах", "учалов"),
-        "Давлеканово": ("давлеканово",),
-        "Дюртюли": ("дюртюли", "дюртюлях"),
-        "Янаул": ("янаул", "янауле", "янаула"),
+        "Салават": ("салават", "салавате", "салавата", "салавату", "salavat"),
+        "Нефтекамск": ("нефтекамск", "нефтекамске", "нефтекамска", "нефтикамск", "neftekamsk"),
+        "Октябрьский": ("октябрьский", "октябрьском", "октябрьского", "октябрьскому", "oktyabrsky"),
+        "Белорецк": ("белорецк", "белорецке", "белорецка", "beloretsk"),
+        "Туймазы": ("туймазы", "туймазах", "туймазов", "tuymazy"),
+        "Ишимбай": ("ишимбай", "ишимбае", "ишимбая", "ishimbay"),
+        "Кумертау": ("кумертау", "kumertau"),
+        "Сибай": ("сибай", "сибае", "сибая", "sibay"),
+        "Мелеуз": ("мелеуз", "мелеузе", "мелеуза", "meleuz"),
+        "Белебей": ("белебей", "белебее", "белебея", "belebey"),
+        "Бирск": ("бирск", "бирске", "бирска", "birsk"),
+        "Благовещенск": ("благовещенск", "благовещенске", "благовещенска", "blagoveshchensk"),
+        "Учалы": ("учалы", "учалах", "учалов", "uchaly"),
+        "Давлеканово": ("давлеканово", "davlekanovo"),
+        "Дюртюли": ("дюртюли", "дюртюлях", "dyurtyuli"),
+        "Янаул": ("янаул", "янауле", "янаула", "yanaul"),
+        "Зирган": ("зирган", "зиргане", "зиргана", "zirgan"),
     }
 )
 
@@ -462,6 +464,29 @@ def _resolve_russian_month(token: str) -> int | None:
     return None
 
 
+def _resolve_year(day: int, month: int, explicit_year: int | None, reference: datetime) -> int:
+    """Определяет год даты и переносит его на следующий, если дата без года ушла в прошлое больше чем на 30 дней.
+
+    Arguments:
+        day: День месяца.
+        month: Номер месяца от 1 до 12.
+        explicit_year: Год, явно указанный в тексте, либо `None`.
+        reference: Опорные дата и время разбора.
+
+    Returns:
+        Явный год, год опорной даты или следующий за ним.
+    """
+    if explicit_year is not None:
+        return explicit_year
+    try:
+        candidate_date = date(reference.year, month, day)
+    except ValueError:
+        return reference.year
+    if (reference.date() - candidate_date).days > 30:
+        return reference.year + 1
+    return reference.year
+
+
 def _extract_times(text: str) -> tuple[time | None, time | None]:
     """Извлекает время начала и окончания из строки даты."""
     range_match = _TIME_RANGE_PATTERN.search(text)
@@ -552,7 +577,8 @@ def parse_event_datetime(
     for numeric_match in _NUMERIC_DATE_PATTERN.finditer(cleaned):
         day_number = int(numeric_match.group(1))
         numeric_month = int(numeric_match.group(2))
-        year_number = int(numeric_match.group(3)) if numeric_match.group(3) else reference_datetime.year
+        explicit_year = int(numeric_match.group(3)) if numeric_match.group(3) else None
+        year_number = _resolve_year(day_number, numeric_month, explicit_year, reference_datetime)
         remaining_text = f"{cleaned[: numeric_match.start()]} {cleaned[numeric_match.end() :]}"
         try:
             resolved_date = date(year_number, numeric_month, day_number)
@@ -565,7 +591,12 @@ def parse_event_datetime(
         day_start = int(russian_range_match.group(1))
         day_end = int(russian_range_match.group(2))
         range_month = _resolve_russian_month(russian_range_match.group(3))
-        year_number = int(russian_range_match.group(4)) if russian_range_match.group(4) else reference_datetime.year
+        explicit_year = int(russian_range_match.group(4)) if russian_range_match.group(4) else None
+        year_number = (
+            _resolve_year(day_start, range_month, explicit_year, reference_datetime)
+            if range_month
+            else reference_datetime.year
+        )
         remaining_text = f"{cleaned[: russian_range_match.start()]} {cleaned[russian_range_match.end() :]}"
         if range_month is not None:
             try:
@@ -581,7 +612,12 @@ def parse_event_datetime(
     if russian_match is not None:
         day_number = int(russian_match.group(1))
         single_month = _resolve_russian_month(russian_match.group(2))
-        year_number = int(russian_match.group(3)) if russian_match.group(3) else reference_datetime.year
+        explicit_year = int(russian_match.group(3)) if russian_match.group(3) else None
+        year_number = (
+            _resolve_year(day_number, single_month, explicit_year, reference_datetime)
+            if single_month
+            else reference_datetime.year
+        )
         remaining_text = f"{cleaned[: russian_match.start()]} {cleaned[russian_match.end() :]}"
         if single_month is not None:
             try:

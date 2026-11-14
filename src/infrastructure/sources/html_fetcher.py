@@ -12,17 +12,22 @@ from src.core.exceptions import ValidationSchemaError
 from src.core.logger import get_logger
 from src.domain.entities import FetchedSourceItem, SourceDefinition
 from src.domain.exceptions import UnsupportedSourceFormatError
+from src.infrastructure.sources.http_client import PoliteHttpClient
 from src.infrastructure.sources.registry import (
     DEFAULT_SOURCE_USER_AGENT,
+    ParserConfiguration,
+    create_standalone_polite_client,
     decode_utf8_content,
     extract_age_text,
     extract_scalar_text,
     fetch_source_bytes,
     format_price_text_from_parts,
+    load_parser_configurations,
     normalize_status_marker,
     resolve_external_identifier,
     resolve_item_source_url,
 )
+from src.infrastructure.sources.site_parsers import parse_site_page
 
 __all__ = ["HtmlSourceFetcher"]
 
@@ -172,42 +177,45 @@ class HtmlSourceFetcher:
         default_timeout_seconds: float = 5.0,
         project_root: Path = PROJECT_ROOT,
         local_feeds_directory: Path | None = None,
+        polite_client: PoliteHttpClient | None = None,
+        sources_config_path: Path | None = None,
     ) -> None:
-        """Инициализирует HTML-загрузчик с опциональным HTTP-клиентом или транспортом.
+        """Инициализирует HTML-загрузчик.
 
         Arguments:
             http_client: Внешний экземпляр `httpx.AsyncClient` (не закрывается при `close()`).
             transport: Опциональный транспорт `httpx` для изолированного тестирования.
             user_agent: Значение HTTP-заголовка `User-Agent`.
-            default_timeout_seconds: Таймаут HTTP-клиента по умолчанию в секундах.
+            default_timeout_seconds: Устаревший параметр; таймаут задаётся в описании источника.
             project_root: Корневая директория проекта для безопасного чтения локальных файлов.
             local_feeds_directory: Дополнительная директория локальных фидов.
+            polite_client: Общий вежливый HTTP-клиент сборщика; без него создаётся собственный.
+            sources_config_path: Реестр источников, из которого берутся именные парсеры сайтов;
+                без него все страницы разбираются общим разбором JSON-LD и карточек.
         """
-        self._http_client = http_client
-        self._owns_http_client = http_client is None
-        self._transport = transport
-        self._user_agent = user_agent
-        self._default_timeout_seconds = default_timeout_seconds
+        del default_timeout_seconds
+        self._owns_polite_client = polite_client is None
+        self._polite_client = polite_client or create_standalone_polite_client(
+            user_agent=user_agent, http_client=http_client, transport=transport
+        )
         self._project_root = project_root
         self._local_feeds_directory = local_feeds_directory
-
-    def _get_or_create_http_client(self) -> httpx.AsyncClient:
-        """Возвращает переданный или лениво созданный асинхронный HTTP-клиент."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(self._default_timeout_seconds),
-                headers={"User-Agent": self._user_agent},
-                follow_redirects=True,
-                transport=self._transport,
-            )
-            self._owns_http_client = True
-        return self._http_client
+        self._sources_config_path = sources_config_path
 
     async def close(self) -> None:
-        """Закрывает внутренний `httpx.AsyncClient`, если он был создан самим загрузчиком."""
-        if self._owns_http_client and self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+        """Закрывает собственный HTTP-клиент, если он был создан самим загрузчиком."""
+        if self._owns_polite_client:
+            await self._polite_client.close()
+
+    def _find_parser_configuration(self, source: SourceDefinition) -> ParserConfiguration | None:
+        """Возвращает именной парсер источника из реестра.
+
+        Реестр перечитывается при каждом вызове, чтобы правки `sources.yaml` подхватывались без перезапуска.
+        """
+        if self._sources_config_path is None:
+            return None
+        configurations = load_parser_configurations(self._sources_config_path, project_root=self._project_root)
+        return configurations.get(source.name)
 
     def _parse_ld_json_items(
         self, soup: BeautifulSoup, *, source: SourceDefinition
@@ -453,8 +461,7 @@ class HtmlSourceFetcher:
         """
         raw_bytes = await fetch_source_bytes(
             source=source,
-            get_http_client=self._get_or_create_http_client,
-            user_agent=self._user_agent,
+            http_client=self._polite_client,
             project_root=self._project_root,
             local_feeds_directory=self._local_feeds_directory,
         )
@@ -462,6 +469,12 @@ class HtmlSourceFetcher:
         stripped = raw_text.strip()
         if not stripped:
             raise ValidationSchemaError(f"HTML-источник '{source.name}' вернул пустое содержимое.")
+
+        parser_configuration = self._find_parser_configuration(source)
+        if parser_configuration is not None:
+            return await parse_site_page(
+                html=raw_text, source=source, parser_configuration=parser_configuration, http_client=self._polite_client
+            )
 
         if stripped.startswith(("{", "[")):
             raise UnsupportedSourceFormatError(

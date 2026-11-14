@@ -15,6 +15,7 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from src.application._helpers import attach_default_timezone, resolve_duration_minutes
+from src.application.event_merging import DuplicateCandidate, find_similar_event
 from src.application.subscriptions import SubscriptionService
 from src.core.exceptions import ApplicationException, ValidationException
 from src.core.logger import get_logger
@@ -45,7 +46,6 @@ from src.domain.ports import (
 )
 from src.domain.services import (
     BASHKORTOSTAN_TIMEZONE,
-    are_events_duplicates,
     compute_deduplication_key,
     compute_payload_hash,
     inspect_untrusted_text,
@@ -67,8 +67,6 @@ _FALLBACK_CITY: Final[str] = "Уточняется"
 _FALLBACK_VENUE: Final[str] = "Уточняется на странице источника"
 _FALLBACK_TITLE: Final[str] = "Мероприятие без названия"
 _FALLBACK_SOURCE_URL: Final[str] = "https://cultural-meridian.local/unknown"
-_DEDUPLICATION_WINDOW_HOURS: Final[int] = 24
-_MAXIMUM_SEARCH_CANDIDATES: Final[int] = 100
 _VERIFY_LINKS_PAGE_SIZE: Final[int] = 100
 _ALLOWED_AGE_LIMITS: Final[frozenset[int]] = frozenset({0, 6, 12, 16, 18})
 _CANCELED_STATUS_VALUES: Final[frozenset[str]] = frozenset(
@@ -445,6 +443,13 @@ class EventIngestionService:
             )
             return
 
+        if saved_event is None:
+            counters.items_unchanged += 1
+            await self._safe_update_raw_status(
+                raw_event_identifier=raw_record.identifier, normalization_status="normalized", error_message=None
+            )
+            return
+
         batch_events_by_identifier[saved_event.identifier] = saved_event
         batch_events_by_hash[raw_record.source_hash] = saved_event
         for source_reference in saved_event.sources:
@@ -466,7 +471,7 @@ class EventIngestionService:
         counters: _IngestionCounters,
         batch_events_by_identifier: Mapping[UUID, Event],
         batch_events_by_hash: Mapping[str, Event],
-    ) -> Event:
+    ) -> Event | None:
         # 1. Проверка и очистка недоверенных текстовых полей
         sanitized = _sanitize_fetched_item(fetched_item)
 
@@ -528,8 +533,21 @@ class EventIngestionService:
         effective_duration = _safe_resolve_duration(
             date_start=effective_date_start, date_end=effective_date_end, explicit_duration=extracted.duration_minutes
         )
-        effective_venue = (extracted.venue or _FALLBACK_VENUE)[:255]
-        effective_address = (extracted.address or "")[:500]
+        default_venue = _resolve_default_venue(
+            source_definition=source_definition,
+            has_venue=extracted.venue is not None,
+            city=extracted.city,
+            venues=venues,
+        )
+        has_real_venue = extracted.venue is not None or default_venue is not None
+        resolved_venue_name = extracted.venue or (default_venue.name if default_venue is not None else None)
+        effective_venue = (resolved_venue_name or _FALLBACK_VENUE)[:255]
+        effective_address = (
+            extracted.address
+            or (default_venue.address if default_venue is not None else None)
+            or (extracted.city if not has_real_venue else None)
+            or ""
+        )[:500]
         latitude, longitude = _resolve_coordinates(
             effective_venue=effective_venue,
             effective_city=effective_city,
@@ -543,21 +561,30 @@ class EventIngestionService:
                 date_start=effective_date_start, date_end=effective_date_end, current_time=current_time
             )
         )
+        if is_past_event:
+            logger.info(
+                "Запись %s источника «%s» уже прошла и пропущена.",
+                raw_record.external_identifier,
+                raw_record.source_name,
+            )
+            return None
 
         # 7. Дедупликация по source_hash и нечёткому совпадению (город, дата, название, площадка)
         deduplication_key = compute_deduplication_key(
             normalized_title=effective_normalized_title,
             date_start=effective_date_start,
             city=effective_city,
-            venue=extracted.venue,
+            venue=resolved_venue_name,
         )
         existing_event, matched_by_hash = await self._find_existing_event(
             source_type=raw_record.source_type,
             source_hash=raw_record.source_hash,
+            source_name=raw_record.source_name[:120],
+            source_url=effective_source_url,
             normalized_title=effective_normalized_title,
             date_start=effective_date_start,
             city=effective_city,
-            venue=extracted.venue,
+            venue=resolved_venue_name,
             deduplication_key=deduplication_key,
             can_search_duplicates=has_real_city and has_real_date,
             batch_events_by_identifier=batch_events_by_identifier,
@@ -569,9 +596,9 @@ class EventIngestionService:
             is_canceled=is_canceled,
             has_suspicious_instructions=sanitized.has_suspicious_instructions,
             link_result=link_result,
-            is_past_event=is_past_event,
             has_real_title=has_real_title,
             has_real_city=has_real_city,
+            has_real_venue=has_real_venue,
             has_real_date=has_real_date,
             confidence=extracted.confidence,
             confidence_threshold=self._confidence_threshold,
@@ -812,6 +839,8 @@ class EventIngestionService:
         *,
         source_type: SourceType,
         source_hash: str,
+        source_name: str,
+        source_url: str,
         normalized_title: str,
         date_start: datetime,
         city: str,
@@ -834,42 +863,23 @@ class EventIngestionService:
         if not can_search_duplicates:
             return None, False
 
-        for batch_candidate in batch_events_by_identifier.values():
-            duplicate_check = are_events_duplicates(
-                batch_candidate,
+        similar_event = await find_similar_event(
+            candidate=DuplicateCandidate(
                 normalized_title=normalized_title,
                 date_start=date_start,
                 city=city,
                 venue=venue,
                 deduplication_key=deduplication_key,
-            )
-            if duplicate_check.is_duplicate:
-                return batch_candidate, False
-
-        window_delta = timedelta(hours=_DEDUPLICATION_WINDOW_HOURS)
-        nearby_page = await self._event_repository.search_events(
-            search_filter=EventSearchFilter(
-                city=city,
-                date_from=date_start - window_delta,
-                date_to=date_start + window_delta,
-                page=1,
-                page_size=_MAXIMUM_SEARCH_CANDIDATES,
+                sources=(
+                    EventSourceReference(
+                        source_name=source_name, source_type=source_type, source_url=source_url, source_hash=source_hash
+                    ),
+                ),
             ),
-            statuses=(EventStatus.PUBLISHED, EventStatus.DRAFT, EventStatus.CANCELED),
+            event_repository=self._event_repository,
+            batch_events=batch_events_by_identifier.values(),
         )
-        for existing_candidate in nearby_page.items:
-            duplicate_check = are_events_duplicates(
-                existing_candidate,
-                normalized_title=normalized_title,
-                date_start=date_start,
-                city=city,
-                venue=venue,
-                deduplication_key=deduplication_key,
-            )
-            if duplicate_check.is_duplicate:
-                return existing_candidate, False
-
-        return None, False
+        return similar_event, False
 
     async def _enqueue_moderation(
         self,
@@ -1229,6 +1239,23 @@ def _has_valid_title(title: str | None) -> bool:
     return bool(normalize_title(cleaned))
 
 
+def _resolve_default_venue(
+    *,
+    source_definition: SourceDefinition | None,
+    has_venue: bool,
+    city: str | None,
+    venues: RealCollection[VenueReference],
+) -> VenueReference | None:
+    """Подставляет площадку источника по умолчанию, если площадка записи не указана.
+
+    Площадка ищется в справочнике только в городе записи, поэтому на гастроли домашняя сцена не подставляется.
+    """
+    if has_venue or city is None or source_definition is None or source_definition.default_venue is None:
+        return None
+    match = normalize_venue(source_definition.default_venue, venues=venues, city=city)
+    return match if isinstance(match, VenueReference) else None
+
+
 def _is_event_in_past(*, date_start: datetime, date_end: datetime | None, current_time: datetime) -> bool:
     if date_end is not None:
         return attach_default_timezone(date_end) < current_time
@@ -1242,9 +1269,9 @@ def _collect_moderation_reasons(
     is_canceled: bool,
     has_suspicious_instructions: bool,
     link_result: LinkCheckResult,
-    is_past_event: bool,
     has_real_title: bool,
     has_real_city: bool,
+    has_real_venue: bool,
     has_real_date: bool,
     confidence: float,
     confidence_threshold: float,
@@ -1259,12 +1286,12 @@ def _collect_moderation_reasons(
     if not is_canceled:
         if not link_result.is_reachable:
             reasons.append(f"Ссылка на первоисточник недоступна ({_format_link_failure_detail(link_result)}).")
-        if is_past_event:
-            reasons.append("Дата проведения мероприятия находится в прошлом относительно времени сбора.")
         if not has_real_title:
             reasons.append("Отсутствует корректное название мероприятия.")
         if not has_real_city:
             reasons.append("Не удалось определить город проведения (назначено «Уточняется»).")
+        if not has_real_venue:
+            reasons.append("Площадка не определена по справочнику (назначено «Уточняется на странице источника»).")
         if not has_real_date:
             reasons.append("Не удалось распознать дату начала (для черновика назначена опорная дата).")
         if extractor_error_reason is not None:
