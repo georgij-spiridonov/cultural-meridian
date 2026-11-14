@@ -193,7 +193,7 @@ class AgentDialogService:
         """
         started_at = time.perf_counter()
         resolved_request_id = normalize_optional_text(request_identifier) or str(uuid4())
-        reference_now = attach_default_timezone(current_datetime or datetime.now())
+        reference_now = attach_default_timezone(current_datetime or datetime.now(tz=BASHKORTOSTAN_TIMEZONE))
         trace_id = uuid4()
 
         inspection = inspect_untrusted_text(user_message)
@@ -399,7 +399,7 @@ class AgentDialogService:
 
         started_at = time.perf_counter()
         resolved_request_id = normalize_optional_text(request_identifier) or str(uuid4())
-        reference_now = attach_default_timezone(current_datetime or datetime.now())
+        reference_now = attach_default_timezone(current_datetime or datetime.now(tz=BASHKORTOSTAN_TIMEZONE))
         trace_id = uuid4()
 
         result, resolved_status = await self._resolve_pending_action_decision(
@@ -828,7 +828,7 @@ class AgentDialogService:
     ) -> AgentTurnResult:
         """Сохраняет реплики диалога, учёт токенов/стоимости и запись трассировки."""
         if save_dialog_messages:
-            assistant_timestamp = attach_default_timezone(datetime.now())
+            assistant_timestamp = datetime.now(tz=BASHKORTOSTAN_TIMEZONE)
             if assistant_timestamp < reference_now:
                 assistant_timestamp = reference_now
             assistant_content = _format_assistant_history_content(result)
