@@ -6,6 +6,7 @@ from typing import Final
 
 from src.core.types import EventCategory, EventStatus
 from src.domain.entities import (
+    AgentTurnResult,
     EmptySearchExplanation,
     Event,
     EventSearchFilter,
@@ -29,6 +30,7 @@ __all__ = [
     "MAXIMUM_TELEGRAM_MESSAGE_LENGTH",
     "escape_html",
     "format_active_filter_summary",
+    "format_agent_turn_message",
     "format_cancel_message",
     "format_empty_search_message",
     "format_event_card_message",
@@ -242,6 +244,56 @@ def format_events_page_message(
         lines.append("")
 
     lines.append("Нажмите на кнопку с номером и названием ниже, чтобы открыть подробную карточку.")
+    lines.append(f"<i>ℹ️ {escape_html(SERVICE_DISCLAIMER_TEXT)}</i>")
+    return _fit_telegram_message("\n".join(lines))
+
+
+def format_agent_turn_message(turn_result: AgentTurnResult) -> str:
+    """Форматирует ответ ИИ-агента с подтверждёнными карточками и пояснениями для Telegram.
+
+    Arguments:
+        turn_result: Результат диалогового шага из `AgentDialogService`.
+
+    Returns:
+        Готовое HTML-сообщение в пределах лимита Telegram.
+    """
+    lines: list[str] = []
+    answer_text = turn_result.answer_text.strip()
+    if answer_text:
+        lines.append(escape_html(answer_text))
+
+    if turn_result.recommended_events:
+        if lines:
+            lines.append("")
+        for index, event in enumerate(turn_result.recommended_events, start=1):
+            category_label = CATEGORY_LABELS.get(event.category, event.category.value)
+            short_title = truncate_plain_text(event.title, maximum_length=_MAXIMUM_LIST_TITLE_LENGTH)
+            datetime_label = format_telegram_datetime(event)
+            price_label = format_price_label(event)
+            lines.append(f"<b>{index}. {escape_html(short_title)}</b> · <i>{escape_html(category_label)}</i>")
+            lines.append(f"📅 {escape_html(datetime_label)}")
+            lines.append(
+                f"📍 {escape_html(event.city)}, {escape_html(event.venue)} · "
+                f"💳 {escape_html(price_label)} · 🔞 {event.age_limit}+"
+            )
+            explanation = turn_result.explanations_by_event.get(event.identifier)
+            if explanation:
+                lines.append(f"💬 {escape_html(explanation)}")
+            lines.append("")
+
+    clarifying_question = turn_result.clarifying_question.strip() if turn_result.clarifying_question else ""
+    if clarifying_question and clarifying_question not in answer_text:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append(f"❓ {escape_html(clarifying_question)}")
+
+    if turn_result.recommended_events:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("Нажмите на кнопку с номером и названием ниже, чтобы открыть подробную карточку.")
+
+    if lines and lines[-1] != "":
+        lines.append("")
     lines.append(f"<i>ℹ️ {escape_html(SERVICE_DISCLAIMER_TEXT)}</i>")
     return _fit_telegram_message("\n".join(lines))
 

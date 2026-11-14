@@ -51,6 +51,7 @@ from src.domain.ports import (
     EventRepositoryPort,
 )
 from src.domain.services import (
+    BASHKORTOSTAN_TIMEZONE,
     contains_system_prompt_leak,
     inspect_untrusted_text,
     normalize_optional_text,
@@ -474,6 +475,12 @@ class AgentDialogService:
         self, *, consumed: PendingAction, channel: DialogChannel, subscriber_identifier: str
     ) -> str:
         """Выполняет подтверждённую мутацию через `SubscriptionService`."""
+        if consumed.payload.get("operation") == "unsubscribe_all":
+            removed_count = await self._subscription_service.unsubscribe_all(
+                channel=channel, subscriber_identifier=subscriber_identifier
+            )
+            return f"Все ваши подписки физически удалены ({removed_count} шт.)."
+
         if consumed.action_type == "subscribe":
             raw_city = consumed.payload.get("city")
             city = raw_city if isinstance(raw_city, str) else None
@@ -706,9 +713,10 @@ class AgentDialogService:
             assistant_timestamp = attach_default_timezone(datetime.now())
             if assistant_timestamp < reference_now:
                 assistant_timestamp = reference_now
+            assistant_content = _format_assistant_history_content(result)
             messages = (
                 DialogMessage(role="user", content=user_query, created_at=reference_now),
-                DialogMessage(role="assistant", content=result.answer_text, created_at=assistant_timestamp),
+                DialogMessage(role="assistant", content=assistant_content, created_at=assistant_timestamp),
             )
             await self._dialog_repository.append_messages(session_identifier=session_identifier, messages=messages)
 
@@ -760,3 +768,33 @@ class AgentDialogService:
         return replace(
             result, trace_identifier=trace_identifier, latency_milliseconds=elapsed_ms, prompt_version=prompt_version
         )
+
+
+def _format_assistant_history_content(result: AgentTurnResult) -> str:
+    """Формирует компактную реплику ассистента для памяти диалога без раскрытия UUID."""
+    lines: list[str] = []
+    answer_text = result.answer_text.strip()
+    if answer_text:
+        lines.append(answer_text)
+
+    if result.recommended_events and not result.fallback_used:
+        lines.append("Показанные карточки:")
+        for index, event in enumerate(result.recommended_events, start=1):
+            local_start = attach_default_timezone(event.date_start).astimezone(BASHKORTOSTAN_TIMEZONE)
+            if event.is_free or event.price_minimum == 0:
+                price_note = "бесплатно"
+            elif event.price_minimum is not None:
+                price_note = f"от {event.price_minimum} ₽"
+            else:
+                price_note = "цена уточняется"
+            clean_title = sanitize_control_characters(event.title, maximum_length=120)
+            lines.append(
+                f"{index}. «{clean_title}» ({event.city}, {local_start:%d.%m.%Y %H:%M}, "
+                f"{price_note}, {event.age_limit}+)"
+            )
+
+    clarifying = result.clarifying_question.strip() if result.clarifying_question else ""
+    if clarifying and clarifying not in answer_text:
+        lines.append(clarifying)
+
+    return "\n".join(lines) if lines else answer_text

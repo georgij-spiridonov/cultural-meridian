@@ -16,11 +16,20 @@ from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage, T
 from aiogram.methods.base import TelegramType
 from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message, Update, User
 
-from src.application import EventSearchService, SubscriptionService, WeekendPlannerService
-from src.core.configuration import PROJECT_ROOT, GeolocationSettings, TelegramSettings
+from src.application import (
+    AgentDialogService,
+    EventSearchService,
+    FallbackSearchService,
+    SubscriptionService,
+    WeekendPlannerService,
+)
+from src.core.configuration import PROJECT_ROOT, GeolocationSettings, LanguageModelSettings, TelegramSettings
+from src.core.exceptions import ServiceAvailabilityException
 from src.core.types import DialogChannel, EventCategory, EventStatus, RealCollection, SourceType
 from src.domain.entities import (
+    AgentToolInvocation,
     AgentTraceRecord,
+    AgentTurnResult,
     AuditLogEntry,
     CityReference,
     ConstraintRelaxationSuggestion,
@@ -48,6 +57,7 @@ from src.domain.exceptions import (
     PendingActionNotFoundError,
     SubscriptionNotFoundError,
 )
+from src.domain.ports import AgentToolCallbacks
 from src.domain.services import BASHKORTOSTAN_TIMEZONE, compute_deduplication_key, normalize_title
 from src.entrypoints.bootstrap import ApplicationContainer
 from src.entrypoints.telegram_bot._search_parser import parse_search_query_to_filter
@@ -218,8 +228,9 @@ class _AdministrationRepositoryStub:
     """Локальный стаб репозитория подписок и модерации."""
 
     def __init__(self) -> None:
-        """Инициализирует хранилище подписок в памяти."""
+        """Инициализирует хранилище подписок и обращений в памяти."""
         self.subscriptions: dict[UUID, SubscriptionRecord] = {}
+        self.feedback_requests: list[FeedbackRequestRecord] = []
 
     async def create_subscription(self, *, subscription: SubscriptionRecord) -> SubscriptionRecord:
         """Сохраняет идемпотентную подписку."""
@@ -269,7 +280,8 @@ class _AdministrationRepositoryStub:
         return len(matching_identifiers)
 
     async def save_feedback_request(self, *, feedback_request: FeedbackRequestRecord) -> FeedbackRequestRecord:
-        """Заглушка сохранения обращения."""
+        """Сохраняет обращение в памяти стаба."""
+        self.feedback_requests.append(feedback_request)
         return feedback_request
 
     async def list_feedback_requests(
@@ -1563,3 +1575,256 @@ async def test_plan_relaxation_callbacks_and_invalid_request_errors() -> None:
     injection_msg = fake_session.requests[-1]
     assert isinstance(injection_msg, SendMessage)
     assert "отклонён" in injection_msg.text
+
+
+class _TelegramAgentOrchestratorStub:
+    """Мок-оркестратор ИИ-агента для модульных тестов Telegram-бота."""
+
+    def __init__(
+        self,
+        *,
+        event_by_turn: list[Event] | None = None,
+        raise_on_call: Exception | None = None,
+        action_mode: Literal["subscribe", "feedback"] | None = None,
+    ) -> None:
+        self._events = list(event_by_turn or [])
+        self._raise_on_call = raise_on_call
+        self._action_mode = action_mode
+        self.received_histories: list[tuple[DialogMessage, ...]] = []
+        self.received_messages: list[str] = []
+
+    async def run_turn(
+        self,
+        *,
+        session_state: DialogSessionState,
+        user_message: str,
+        current_datetime: datetime,
+        tool_callbacks: AgentToolCallbacks,
+        maximum_steps: int = 5,
+    ) -> AgentTurnResult:
+        del current_datetime, maximum_steps
+        self.received_histories.append(session_state.recent_messages)
+        self.received_messages.append(user_message)
+        if self._raise_on_call is not None:
+            raise self._raise_on_call
+
+        if self._action_mode == "subscribe":
+            pending = await tool_callbacks.prepare_subscribe("Уфа", EventCategory.CONCERT)
+            return AgentTurnResult(
+                answer_text=pending.confirmation_prompt, pending_action=pending, model_name="google/gemini-4-hydrogen"
+            )
+        if self._action_mode == "feedback":
+            pending = await tool_callbacks.prepare_feedback(None, "Уточните время начала спектакля", "@tg_user")
+            return AgentTurnResult(
+                answer_text=pending.confirmation_prompt, pending_action=pending, model_name="google/gemini-4-hydrogen"
+            )
+
+        target_event = self._events[min(len(self.received_messages) - 1, len(self._events) - 1)]
+        fetched = await tool_callbacks.get_event(target_event.identifier)
+        return AgentTurnResult(
+            answer_text="Подобрал подходящее мероприятие по вашему запросу.",
+            recommended_events=(fetched,),
+            explanations_by_event={fetched.identifier: "Подходит по дате и формату."},
+            clarifying_question="Уточнить район или бюджет?",
+            tool_invocations=(
+                AgentToolInvocation(
+                    tool_name="get_event",
+                    arguments={"event_id": str(fetched.identifier)},
+                    returned_event_identifiers=(fetched.identifier,),
+                    succeeded=True,
+                ),
+            ),
+            model_name="google/gemini-4-hydrogen",
+        )
+
+
+def _build_ai_bot_test_context(
+    *, events: Sequence[Event], orchestrator: _TelegramAgentOrchestratorStub, page_size: int = 5
+) -> tuple[
+    Dispatcher, Bot, _FakeTelegramSession, _AdministrationRepositoryStub, _DialogRepositoryStub, AgentDialogService
+]:
+    cities = (
+        CityReference(name="Уфа", normalized_name="уфа", aliases=("уфе",)),
+        CityReference(name="Стерлитамак", normalized_name="стерлитамак", aliases=("стерлитамаке",)),
+    )
+    event_repository = _EventRepositoryStub(events=events, cities=cities)
+    administration_repository = _AdministrationRepositoryStub()
+    dialog_repository = _DialogRepositoryStub()
+    search_service = EventSearchService(event_repository=event_repository)
+    subscription_service = SubscriptionService(
+        administration_repository=administration_repository, event_repository=event_repository
+    )
+    weekend_planner = WeekendPlannerService(event_repository=event_repository)
+    fallback_search = FallbackSearchService(event_repository=event_repository, weekend_planner=weekend_planner)
+    lm_settings = LanguageModelSettings(_env_file=None, API_KEY="test-key", PROMPT_VERSION="v1.0")
+    agent_dialog_service = AgentDialogService(
+        event_repository=event_repository,
+        dialog_repository=dialog_repository,
+        administration_repository=administration_repository,
+        search_service=search_service,
+        subscription_service=subscription_service,
+        weekend_planner=weekend_planner,
+        fallback_search=fallback_search,
+        agent_orchestrator=orchestrator,
+        language_model_settings=lm_settings,
+    )
+
+    container = MagicMock(spec=ApplicationContainer)
+    container.search_service = search_service
+    container.subscription_service = subscription_service
+    container.dialog_repository = dialog_repository
+    container.agent_dialog_service = agent_dialog_service
+    container.weekend_planner = weekend_planner
+    container.telegram_settings = TelegramSettings(
+        BOT_TOKEN="", PAGE_SIZE=page_size, IDLE_POLL_SECONDS=0.05, PUBLIC_WEB_BASE_URL=""
+    )
+
+    dispatcher = Dispatcher()
+    dispatcher.include_router(create_telegram_router(container, duplicate_callback_cooldown_seconds=0.0))
+    fake_session = _FakeTelegramSession()
+    bot = Bot(
+        token="123456:TEST_TOKEN_FOR_AI_UNIT_TESTS",
+        session=fake_session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    return dispatcher, bot, fake_session, administration_repository, dialog_repository, agent_dialog_service
+
+
+async def test_handlers_ai_dialog_passes_history_and_falls_back_to_regex_on_failure() -> None:
+    """Проверяет передачу истории в ИИ-агента и переход на regex-поиск только при сбое ИИ."""
+    adult_concert = _build_test_event(title="Симфонический концерт в Уфе", city="Уфа", age_limit=12)
+    kids_show = _build_test_event(
+        title="Детский кукольный спектакль", city="Уфа", category=EventCategory.SPECTACLE, age_limit=0
+    )
+    orchestrator = _TelegramAgentOrchestratorStub(event_by_turn=[adult_concert, kids_show])
+    dispatcher, bot, fake_session, _, dialog_repository, agent_dialog_service = _build_ai_bot_test_context(
+        events=[adult_concert, kids_show], orchestrator=orchestrator
+    )
+
+    # 1. Первый ход: история пуста
+    await dispatcher.feed_update(
+        bot,
+        _make_text_update(update_identifier=1, message_identifier=1, user_identifier=9101, text="Куда сходить завтра?"),
+    )
+    first_reply = fake_session.requests[-1]
+    assert isinstance(first_reply, SendMessage)
+    assert "Симфонический концерт в Уфе" in first_reply.text
+    assert "Подходит по дате и формату." in first_reply.text
+    assert orchestrator.received_histories[0] == ()
+    assert isinstance(first_reply.reply_markup, InlineKeyboardMarkup)
+    assert any(
+        button.callback_data == f"event:{adult_concert.identifier}"
+        for row in first_reply.reply_markup.inline_keyboard
+        for button in row
+    )
+
+    # 2. Второй ход: ИИ-агент получает историю первого хода (и пользователя, и рекомендованных карточек без UUID)
+    await dispatcher.feed_update(
+        bot, _make_text_update(update_identifier=2, message_identifier=2, user_identifier=9101, text="А с ребёнком?")
+    )
+    second_reply = fake_session.requests[-1]
+    assert isinstance(second_reply, SendMessage)
+    assert "Детский кукольный спектакль" in second_reply.text
+    history_turn2 = orchestrator.received_histories[1]
+    assert len(history_turn2) == 2
+    assert history_turn2[0].role == "user"
+    assert history_turn2[0].content == "Куда сходить завтра?"
+    assert history_turn2[1].role == "assistant"
+    assert "Симфонический концерт в Уфе" in history_turn2[1].content
+    assert str(adult_concert.identifier) not in history_turn2[1].content
+
+    # 3. Сбой оркестратора ИИ -> fallback_used=True -> бот вызывает regex-поиск без дублирования истории
+    orchestrator._raise_on_call = ServiceAvailabilityException("Модель временно недоступна")
+    await dispatcher.feed_update(
+        bot, _make_text_update(update_identifier=3, message_identifier=3, user_identifier=9101, text="Концерты в Уфе")
+    )
+    fallback_reply = fake_session.requests[-1]
+    assert isinstance(fallback_reply, SendMessage)
+    assert "Фильтр:" in fallback_reply.text
+    assert "Симфонический концерт в Уфе" in fallback_reply.text
+    assert len(dialog_repository.messages["telegram:9101"]) == 6
+
+    # 4. Непредвиденное исключение прямо в AgentDialogService -> перехват и regex-поиск с записью истории
+    with patch.object(agent_dialog_service, "handle_message", side_effect=RuntimeError("Внезапный сбой")):
+        await dispatcher.feed_update(
+            bot,
+            _make_text_update(update_identifier=4, message_identifier=4, user_identifier=9101, text="Спектакли в Уфе"),
+        )
+    exception_fallback_reply = fake_session.requests[-1]
+    assert isinstance(exception_fallback_reply, SendMessage)
+    assert "Фильтр:" in exception_fallback_reply.text
+    assert "Детский кукольный спектакль" in exception_fallback_reply.text
+    assert len(dialog_repository.messages["telegram:9101"]) == 8
+
+
+async def test_handlers_ai_pending_action_confirm_via_callback() -> None:
+    """Проверяет подтверждение `PendingAction`, созданных ИИ-агентом (`subscribe` и `save_feedback`), кнопками."""
+    sub_orchestrator = _TelegramAgentOrchestratorStub(action_mode="subscribe")
+    dispatcher, bot, fake_session, admin_repo, _, _ = _build_ai_bot_test_context(
+        events=(), orchestrator=sub_orchestrator
+    )
+
+    await dispatcher.feed_update(
+        bot,
+        _make_text_update(
+            update_identifier=1, message_identifier=1, user_identifier=9201, text="Подпиши меня на концерты в Уфе"
+        ),
+    )
+    sub_prompt = fake_session.requests[-1]
+    assert isinstance(sub_prompt, SendMessage)
+    assert isinstance(sub_prompt.reply_markup, InlineKeyboardMarkup)
+    confirm_sub_cb = next(
+        button.callback_data
+        for row in sub_prompt.reply_markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("pa:confirm:")
+    )
+    await dispatcher.feed_update(
+        bot,
+        _make_callback_update(
+            update_identifier=2,
+            callback_identifier="cb-ai-sub-confirm",
+            message_identifier=101,
+            user_identifier=9201,
+            callback_data=confirm_sub_cb,
+        ),
+    )
+    saved_subscriptions = list(admin_repo.subscriptions.values())
+    assert len(saved_subscriptions) == 1
+    assert saved_subscriptions[0].city == "Уфа"
+    assert saved_subscriptions[0].category is EventCategory.CONCERT
+
+    fb_orchestrator = _TelegramAgentOrchestratorStub(action_mode="feedback")
+    fb_dispatcher, fb_bot, fb_session, fb_admin_repo, _, _ = _build_ai_bot_test_context(
+        events=(), orchestrator=fb_orchestrator
+    )
+    await fb_dispatcher.feed_update(
+        fb_bot,
+        _make_text_update(
+            update_identifier=1,
+            message_identifier=1,
+            user_identifier=9202,
+            text="Передай организаторам вопрос о времени начала",
+        ),
+    )
+    fb_prompt = fb_session.requests[-1]
+    assert isinstance(fb_prompt, SendMessage)
+    assert isinstance(fb_prompt.reply_markup, InlineKeyboardMarkup)
+    confirm_fb_cb = next(
+        button.callback_data
+        for row in fb_prompt.reply_markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("pa:confirm:")
+    )
+    await fb_dispatcher.feed_update(
+        fb_bot,
+        _make_callback_update(
+            update_identifier=2,
+            callback_identifier="cb-ai-fb-confirm",
+            message_identifier=101,
+            user_identifier=9202,
+            callback_data=confirm_fb_cb,
+        ),
+    )
+    assert len(fb_admin_repo.feedback_requests) == 1
+    assert "Уточните время начала спектакля" in fb_admin_repo.feedback_requests[0].message_text

@@ -11,6 +11,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from src.core.types import EventCategory, RealCollection
 from src.domain.entities import (
+    AgentTurnResult,
     CityReference,
     Event,
     EventSearchFilter,
@@ -36,6 +37,7 @@ __all__ = [
     "SimilarEventsCallback",
     "SubscriptionCallback",
     "WeekendPlanCallback",
+    "build_agent_turn_keyboard",
     "build_categories_keyboard",
     "build_cities_keyboard",
     "build_empty_search_keyboard",
@@ -382,6 +384,49 @@ def build_search_results_keyboard(
             InlineKeyboardButton(text="🔄 Сбросить", callback_data=MenuCallback(action_name="reset").pack())
         )
     builder.row(*filter_controls)
+
+    footer_buttons: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions").pack()),
+        InlineKeyboardButton(text="🏠 Меню", callback_data=MenuCallback(action_name="home").pack()),
+    ]
+    clean_web_url = sanitize_public_url(public_web_base_url)
+    if clean_web_url is not None:
+        footer_buttons.insert(0, InlineKeyboardButton(text="🌐 Веб-каталог", url=clean_web_url))
+    builder.row(*footer_buttons)
+
+    return builder.as_markup()
+
+
+def build_agent_turn_keyboard(turn_result: AgentTurnResult, *, public_web_base_url: str = "") -> InlineKeyboardMarkup:
+    """Строит клавиатуру ответа ИИ-агента: подтверждение действия, карточки событий или главное меню.
+
+    Arguments:
+        turn_result: Итоговый результат диалогового хода.
+        public_web_base_url: Публичный URL веб-каталога (если настроен).
+
+    Returns:
+        Инлайн-клавиатура для сообщения с ответом ИИ-агента.
+    """
+    if turn_result.pending_action is not None:
+        return build_pending_action_keyboard(turn_result.pending_action.action_identifier)
+
+    if not turn_result.recommended_events:
+        return build_main_menu_keyboard()
+
+    builder = InlineKeyboardBuilder()
+    for index, event in enumerate(turn_result.recommended_events, start=1):
+        short_title = truncate_plain_text(event.title, maximum_length=_MAXIMUM_EVENT_BUTTON_TITLE_LENGTH)
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🎟 {index}. {short_title}",
+                callback_data=EventCardCallback(event_identifier=str(event.identifier)).pack(),
+            )
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="🏙 Город", callback_data=MenuCallback(action_name="cities").pack()),
+        InlineKeyboardButton(text="🎭 Категория", callback_data=MenuCallback(action_name="categories").pack()),
+    )
 
     footer_buttons: list[InlineKeyboardButton] = [
         InlineKeyboardButton(text="🔔 Подписки", callback_data=MenuCallback(action_name="subscriptions").pack()),

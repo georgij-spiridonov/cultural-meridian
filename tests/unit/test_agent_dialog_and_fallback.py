@@ -370,6 +370,10 @@ async def test_dialog_service_preserves_at_least_five_turns_and_post_validates_u
     assert len(dialog_repo.traces) == 1
     assert dialog_repo.traces[0].trace_identifier == result.trace_identifier
     assert dialog_repo.traces[0].fallback_used is False
+    saved_assistant_reply = dialog_repo.messages_by_session["sess-mem"][-1]
+    assert saved_assistant_reply.role == "assistant"
+    assert "Джаз в Уфе" in saved_assistant_reply.content
+    assert str(grounded_event.identifier) not in saved_assistant_reply.content
 
 
 async def test_dialog_service_fallbacks_on_budget_missing_key_and_timeout() -> None:

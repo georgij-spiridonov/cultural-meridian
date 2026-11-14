@@ -18,12 +18,13 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, TelegramObject, Update
 
-from src.application import EventSearchService, SubscriptionService, WeekendPlannerService
+from src.application import AgentDialogService, EventSearchService, SubscriptionService, WeekendPlannerService
 from src.core.configuration import TelegramSettings
 from src.core.exceptions import ApplicationException, ValidationException
-from src.core.logger import get_logger, reset_request_identifier, set_request_identifier
+from src.core.logger import get_logger, get_request_identifier, reset_request_identifier, set_request_identifier
 from src.core.types import DialogChannel, EventCategory, RealCollection
 from src.domain.entities import (
+    AgentTurnResult,
     CityReference,
     DialogMessage,
     EventSearchFilter,
@@ -58,6 +59,7 @@ from src.entrypoints.telegram_bot._search_parser import (
 )
 from src.entrypoints.telegram_bot.formatting import (
     format_active_filter_summary,
+    format_agent_turn_message,
     format_cancel_message,
     format_empty_search_message,
     format_event_card_message,
@@ -83,6 +85,7 @@ from src.entrypoints.telegram_bot.keyboards import (
     SimilarEventsCallback,
     SubscriptionCallback,
     WeekendPlanCallback,
+    build_agent_turn_keyboard,
     build_categories_keyboard,
     build_cities_keyboard,
     build_empty_search_keyboard,
@@ -223,6 +226,7 @@ class TelegramBotDependencies:
     dialog_repository: DialogRepositoryPort
     telegram_settings: TelegramSettings
     filter_store: TelegramSessionFilterStore
+    agent_dialog_service: AgentDialogService | None = None
     weekend_planner: WeekendPlannerService | None = None
     plan_store: WeekendPlanSessionStore = field(default_factory=WeekendPlanSessionStore)
 
@@ -333,6 +337,7 @@ def create_telegram_router(
         dialog_repository=container.dialog_repository,
         telegram_settings=container.telegram_settings,
         filter_store=TelegramSessionFilterStore(),
+        agent_dialog_service=_resolve_agent_dialog_service(container),
         weekend_planner=_resolve_weekend_planner(container),
         plan_store=WeekendPlanSessionStore(),
     )
@@ -494,7 +499,7 @@ def create_telegram_router(
 
     @router.message(F.text)
     async def handle_text_search(message: Message) -> None:
-        """Обрабатывает свободный текстовый запрос Уровня 1–2 поверх `EventSearchService`."""
+        """Обрабатывает свободный текстовый запрос через ИИ-диалог с резервным regex-поиском."""
         if message.from_user is None or message.text is None:
             return
         cleaned_input = sanitize_control_characters(message.text, maximum_length=500)
@@ -524,17 +529,68 @@ def create_telegram_router(
         session_identifier = _build_session_identifier(user_identifier)
         subscriber_identifier = str(user_identifier)
 
-        cities = await dependencies.search_service.list_cities()
-        parsed_filter = parse_search_query_to_filter(
-            cleaned_input, cities=cities, page_size=dependencies.telegram_settings.PAGE_SIZE
-        )
-        await _execute_and_render_search(
-            target=message,
+        if dependencies.agent_dialog_service is not None:
+            raw_request_id = get_request_identifier()
+            request_identifier = None if raw_request_id == "-" else raw_request_id
+            try:
+                turn_result = await dependencies.agent_dialog_service.handle_message(
+                    session_identifier=session_identifier,
+                    channel=DialogChannel.TELEGRAM,
+                    subscriber_identifier=subscriber_identifier,
+                    user_message=cleaned_input,
+                    request_identifier=request_identifier,
+                    current_datetime=datetime.now(tz=BASHKORTOSTAN_TIMEZONE),
+                )
+            except PromptInjectionDetectedError:
+                raise
+            except Exception as error:
+                logger.warning(
+                    "Ошибка ИИ-диалога при обработке сообщения Telegram; переход на regex-поиск (%s).",
+                    type(error).__name__,
+                )
+                await _execute_regex_text_search(
+                    message=message,
+                    dependencies=dependencies,
+                    session_identifier=session_identifier,
+                    subscriber_identifier=subscriber_identifier,
+                    cleaned_input=cleaned_input,
+                    record_history=True,
+                )
+                return
+
+            if turn_result.fallback_reason == "prompt_injection_detected":
+                raise PromptInjectionDetectedError(turn_result.answer_text, source_context="telegram_user_message")
+
+            if not turn_result.fallback_used:
+                await _render_agent_turn_result(
+                    target=message,
+                    dependencies=dependencies,
+                    session_identifier=session_identifier,
+                    turn_result=turn_result,
+                )
+                return
+
+            logger.info(
+                "ИИ-диалог перешёл в резервный режим (%s); выполнение regex-поиска по каталогу.",
+                turn_result.fallback_reason or "unknown",
+            )
+            await _execute_regex_text_search(
+                message=message,
+                dependencies=dependencies,
+                session_identifier=session_identifier,
+                subscriber_identifier=subscriber_identifier,
+                cleaned_input=cleaned_input,
+                record_history=False,
+            )
+            return
+
+        await _execute_regex_text_search(
+            message=message,
             dependencies=dependencies,
             session_identifier=session_identifier,
             subscriber_identifier=subscriber_identifier,
-            search_filter=parsed_filter,
-            user_query_text=cleaned_input,
+            cleaned_input=cleaned_input,
+            record_history=True,
         )
 
     @router.callback_query(MenuCallback.filter())
@@ -910,11 +966,11 @@ def create_telegram_router(
             await _safe_answer_callback(callback_query, text="Подписки удалены")
             return
 
-        if operation == "subscribe":
+        if operation == "subscribe" or consumed.action_type == "subscribe":
             raw_city = consumed.payload.get("city")
             raw_category = consumed.payload.get("category")
             city = raw_city if isinstance(raw_city, str) else None
-            category = EventCategory(raw_category) if isinstance(raw_category, str) else None
+            category = EventCategory(raw_category) if isinstance(raw_category, str) and raw_category.strip() else None
             await dependencies.subscription_service.subscribe(
                 channel=DialogChannel.TELEGRAM,
                 subscriber_identifier=subscriber_identifier,
@@ -929,6 +985,32 @@ def create_telegram_router(
                 notice_text="Подписка успешно оформлена.",
             )
             await _safe_answer_callback(callback_query, text="Подписка оформлена")
+            return
+
+        if consumed.action_type == "save_feedback":
+            raw_event_id = consumed.payload.get("event_identifier")
+            event_identifier: UUID | None = None
+            if isinstance(raw_event_id, UUID):
+                event_identifier = raw_event_id
+            elif isinstance(raw_event_id, str) and raw_event_id.strip():
+                with contextlib.suppress(ValueError):
+                    event_identifier = UUID(raw_event_id.strip())
+            raw_message = consumed.payload.get("message_text")
+            message_text = raw_message if isinstance(raw_message, str) else ""
+            raw_contact = consumed.payload.get("contact_hint")
+            contact_hint = raw_contact if isinstance(raw_contact, str) else None
+            await dependencies.subscription_service.submit_feedback(
+                channel=DialogChannel.TELEGRAM,
+                message_text=message_text,
+                event_identifier=event_identifier,
+                contact_hint=contact_hint,
+            )
+            await _safe_edit_or_send(
+                callback_query.message,
+                text="Спасибо! Ваше обращение сохранено и передано модераторам афиши.",
+                reply_markup=build_main_menu_keyboard(),
+            )
+            await _safe_answer_callback(callback_query, text="Обращение отправлено")
             return
 
         await _safe_edit_or_send(
@@ -1091,6 +1173,42 @@ def create_telegram_router(
     return router
 
 
+async def _render_agent_turn_result(
+    *, target: Message, dependencies: TelegramBotDependencies, session_identifier: str, turn_result: AgentTurnResult
+) -> None:
+    dependencies.filter_store.reset_session(session_identifier)
+    dependencies.plan_store.set_last_mode(session_identifier, "search")
+    response_text = format_agent_turn_message(turn_result)
+    reply_markup = build_agent_turn_keyboard(
+        turn_result, public_web_base_url=dependencies.telegram_settings.PUBLIC_WEB_BASE_URL
+    )
+    await target.answer(response_text, reply_markup=reply_markup)
+
+
+async def _execute_regex_text_search(
+    *,
+    message: Message,
+    dependencies: TelegramBotDependencies,
+    session_identifier: str,
+    subscriber_identifier: str,
+    cleaned_input: str,
+    record_history: bool,
+) -> None:
+    cities = await dependencies.search_service.list_cities()
+    parsed_filter = parse_search_query_to_filter(
+        cleaned_input, cities=cities, page_size=dependencies.telegram_settings.PAGE_SIZE
+    )
+    await _execute_and_render_search(
+        target=message,
+        dependencies=dependencies,
+        session_identifier=session_identifier,
+        subscriber_identifier=subscriber_identifier,
+        search_filter=parsed_filter,
+        user_query_text=cleaned_input,
+        record_history=record_history,
+    )
+
+
 async def _execute_and_render_search(
     *,
     target: Message,
@@ -1100,6 +1218,7 @@ async def _execute_and_render_search(
     search_filter: EventSearchFilter,
     user_query_text: str | None = None,
     edit_existing: bool = False,
+    record_history: bool = True,
 ) -> None:
     search_page = await dependencies.search_service.search_events(
         search_filter=search_filter, include_empty_explanation=True
@@ -1127,14 +1246,15 @@ async def _execute_and_render_search(
         reply_markup = build_empty_search_keyboard(search_filter, filter_token=filter_token)
         assistant_summary = f"Пустая выдача ({format_active_filter_summary(search_filter)})."
 
-    await _record_dialog_messages(
-        dialog_repository=dependencies.dialog_repository,
-        session_identifier=session_identifier,
-        subscriber_identifier=subscriber_identifier,
-        history_limit=dependencies.telegram_settings.DIALOG_HISTORY_LIMIT,
-        user_text=user_query_text or f"Фильтр: {format_active_filter_summary(search_filter)}",
-        assistant_text=assistant_summary,
-    )
+    if record_history:
+        await _record_dialog_messages(
+            dialog_repository=dependencies.dialog_repository,
+            session_identifier=session_identifier,
+            subscriber_identifier=subscriber_identifier,
+            history_limit=dependencies.telegram_settings.DIALOG_HISTORY_LIMIT,
+            user_text=user_query_text or f"Фильтр: {format_active_filter_summary(search_filter)}",
+            assistant_text=assistant_summary,
+        )
 
     if edit_existing:
         await _safe_edit_or_send(target, text=response_text, reply_markup=reply_markup)
@@ -1349,6 +1469,13 @@ async def _safe_edit_or_send(message: Message, *, text: str, reply_markup: Inlin
         if "message is not modified" in str(error).lower():
             return
         await message.answer(text=text, reply_markup=reply_markup)
+
+
+def _resolve_agent_dialog_service(container: ApplicationContainer) -> AgentDialogService | None:
+    candidate = getattr(container, "agent_dialog_service", None)
+    if isinstance(candidate, AgentDialogService):
+        return candidate
+    return None
 
 
 def _resolve_weekend_planner(container: ApplicationContainer) -> WeekendPlannerService | None:
